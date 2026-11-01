@@ -28,14 +28,22 @@ public final class BangumiShortcode {
     private static final Pattern ATTR =
         Pattern.compile("([a-zA-Z-]+)=([^\\s\\]]+)");
 
+    /** 代码区域：里面的短代码只当示例，不转换。 */
+    private static final Pattern CODE_BLOCK =
+        Pattern.compile("(<pre\\b[^>]*>.*?</pre>|<code\\b[^>]*>.*?</code>)",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
     private static final String SCRIPT_TAG =
         "<script src=\"/plugins/plugin-bangumi/assets/static/bangumi.js\" defer></script>";
 
     /** 正文里是否出现了需要渲染的番组元素。 */
     public static boolean hasPlaceholder(String html) {
-        return html != null
-            && (html.contains("class=\"bgm-card") || html.contains("class='bgm-card")
-            || html.contains("bgm-collection") || html.contains("bgm-calendar"));
+        if (html == null) {
+            return false;
+        }
+        return html.contains("class=\"bgm-card\"") || html.contains("class='bgm-card'")
+            || html.contains("class=\"bgm-collection\"") || html.contains("class='bgm-collection'")
+            || html.contains("class=\"bgm-calendar\"") || html.contains("class='bgm-calendar'");
     }
 
     /**
@@ -53,6 +61,20 @@ public final class BangumiShortcode {
     }
 
     private static String replaceShortcodes(String html) {
+        var sb = new StringBuilder();
+        var codeMatcher = CODE_BLOCK.matcher(html);
+        int last = 0;
+        while (codeMatcher.find()) {
+            sb.append(replaceOutside(html.substring(last, codeMatcher.start())));
+            // 代码块原样保留
+            sb.append(codeMatcher.group());
+            last = codeMatcher.end();
+        }
+        sb.append(replaceOutside(html.substring(last)));
+        return sb.toString();
+    }
+
+    private static String replaceOutside(String html) {
         var matcher = SHORTCODE.matcher(html);
         var sb = new StringBuilder();
         while (matcher.find()) {
