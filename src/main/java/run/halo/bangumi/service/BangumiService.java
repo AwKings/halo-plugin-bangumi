@@ -69,8 +69,25 @@ public class BangumiService {
             }
             var key = "collection:" + config.userId() + ":" + category + ":" + listType;
             return client.getCached(key, config.cacheTtl(), fetchAllCollections(config, subjectType, status))
-                .map(all -> page(all, offset, category, listType, config.userId()));
+                .flatMap(all -> {
+                    // 空列表可能是「没有收藏」，也可能是「用户不存在」，后者要说清楚
+                    if (all.isArray() && all.isEmpty() && offset == 0) {
+                        return userExists(config)
+                            .map(exists -> exists
+                                ? (JsonNode) page(all, offset, category, listType, config.userId())
+                                : error("Bangumi 上找不到用户「" + config.userId() + "」，请检查插件设置里的用户 ID"));
+                    }
+                    return Mono.just(page(all, offset, category, listType, config.userId()));
+                });
         });
+    }
+
+    private Mono<Boolean> userExists(BangumiSettings config) {
+        var url = config.apiBase() + "/v0/users/" + encode(config.userId());
+        return client.getCached("user:" + config.userId(), config.cacheTtl(),
+                client.get(url, config.accessToken()))
+            .map(node -> true)
+            .defaultIfEmpty(false);
     }
 
     private Mono<JsonNode> fetchAllCollections(BangumiSettings config, int subjectType, int status) {
@@ -301,6 +318,11 @@ public class BangumiService {
     private ObjectNode error(String message) {
         var node = mapper.createObjectNode();
         node.put("error", message);
+        // 保持字段结构完整，前端脚本照常渲染空列表，同时能读到错误说明
+        node.set("items", mapper.createArrayNode());
+        node.put("next_offset", 0);
+        node.put("has_more", false);
+        node.put("more_url", "");
         return node;
     }
 }
