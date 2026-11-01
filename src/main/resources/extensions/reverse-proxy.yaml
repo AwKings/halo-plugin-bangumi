@@ -1,0 +1,9 @@
+apiVersion: plugin.halo.run/v1alpha1
+kind: ReverseProxy
+metadata:
+  name: plugin-bangumi-assets
+rules:
+  # 把插件内的 static 目录挂到 /plugins/plugin-bangumi/assets/static/**
+  - path: /static/**
+    file:
+      directory: static

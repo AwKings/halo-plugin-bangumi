@@ -1,0 +1,17 @@
+apiVersion: v1alpha1
+kind: Role
+metadata:
+  name: plugin-bangumi-anonymous
+  labels:
+    halo.run/role-template: "true"
+    halo.run/hidden: "true"
+    rbac.authorization.halo.run/aggregate-to-anonymous: "true"
+  annotations:
+    rbac.authorization.halo.run/module: "PandaBangumi"
+    rbac.authorization.halo.run/display-name: "读取番组数据"
+rules:
+  # GET /apis/api.bangumi.halo.run/v1alpha1/data?type=collection|calendar|subject
+  # 集合式 GET 在 Halo/K8s RBAC 里算 list，单个资源才是 get
+  - apiGroups: [ "api.bangumi.halo.run" ]
+    resources: [ "data" ]
+    verbs: [ "get", "list" ]

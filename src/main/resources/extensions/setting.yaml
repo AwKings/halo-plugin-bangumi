@@ -1,0 +1,30 @@
+apiVersion: v1alpha1
+kind: Setting
+metadata:
+  name: plugin-bangumi-settings
+spec:
+  forms:
+    - group: basic
+      label: 基础设置
+      formSchema:
+        - $formkit: text
+          name: userId
+          label: Bangumi 用户 ID
+          placeholder: 例如 sai
+          validation: required
+          help: 填 bgm.tv 的用户名或 UID。收藏列表与「仅在看」日历都按这个账号读取。
+        - $formkit: text
+          name: apiBase
+          label: API 地址
+          value: https://api.bgm.tv
+          help: 一般不用改。官方 API 不稳定时可换成自建镜像（需支持 v0 接口）。
+        - $formkit: number
+          name: cacheTtl
+          label: 缓存时长（秒）
+          value: 3600
+          min: 60
+          help: 收藏、日历、条目的服务端缓存时间，避免频繁请求 Bangumi。
+        - $formkit: password
+          name: accessToken
+          label: Access Token（可选）
+          help: 只读取公开收藏时留空；收藏设为私密时填 Bangumi 个人令牌。

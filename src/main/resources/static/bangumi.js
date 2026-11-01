@@ -1,0 +1,2187 @@
+/* ------------------------------------------------------------------
+ * Halo 移植补充
+ * 1) 数据接口指向 Halo 插件端点
+ * 2) 页面上出现番组元素时自动注入样式，主题无需改模板
+ * ------------------------------------------------------------------ */
+(function () {
+    if (!window.bgmBase) {
+        window.bgmBase = '/apis/api.bangumi.halo.run/v1alpha1/data';
+    }
+
+    function ensureStyles() {
+        if (!document.querySelector('.bgm-card, .bgm-collection, .bgm-calendar')) return;
+        if (document.getElementById('pandabangumi-styles')) return;
+        var link = document.createElement('link');
+        link.id = 'pandabangumi-styles';
+        link.rel = 'stylesheet';
+        link.href = '/plugins/plugin-bangumi/assets/static/bangumi.css';
+        document.head.appendChild(link);
+    }
+
+    window.PandaBangumiEnsureStyles = ensureStyles;
+    ['DOMContentLoaded', 'pjax:complete', 'pjax:end', 'turbo:load'].forEach(function (name) {
+        document.addEventListener(name, ensureStyles);
+    });
+    if (document.readyState !== 'loading') ensureStyles();
+})();
+
+/**
+ * PandaBangumi 全局状态
+ */
+var PandaBangumiRuntime = window.PandaBangumi || {};
+PandaBangumiRuntime.controllers = PandaBangumiRuntime.controllers || new Set();
+PandaBangumiRuntime.initTimer = PandaBangumiRuntime.initTimer || null;
+PandaBangumiRuntime.bound = PandaBangumiRuntime.bound || false;
+PandaBangumiRuntime.coverObserver = PandaBangumiRuntime.coverObserver || null;
+PandaBangumiRuntime.coverLoads = PandaBangumiRuntime.coverLoads || new Map();
+PandaBangumiRuntime.musicObiColors = PandaBangumiRuntime.musicObiColors || new Map();
+PandaBangumiRuntime.coverPreloadMargin = 0;
+PandaBangumiRuntime.requestQueue = PandaBangumiRuntime.requestQueue
+    && typeof PandaBangumiRuntime.requestQueue.enqueue === 'function'
+    ? PandaBangumiRuntime.requestQueue
+    : createRequestQueue(2);
+window.PandaBangumi = PandaBangumiRuntime;
+
+if (!PandaBangumiRuntime.consoleLogged) {
+    console.log(
+        ' %c PandaBangumi %c https://www.himiku.com/archives/pandabangumi.html ',
+        'color: #fff; background: #DF98A0; padding: 5px;',
+        'color: #fff; background: #1c2b36; padding: 5px;'
+    );
+    PandaBangumiRuntime.consoleLogged = true;
+}
+
+/**
+ * 判断是否为请求取消
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isAbortError(error) {
+    return error && error.name === 'AbortError';
+}
+
+function createAbortError() {
+    const error = new Error('The operation was aborted');
+    error.name = 'AbortError';
+    return error;
+}
+
+/**
+ * 等待重试，同时响应 PJAX 请求取消。
+ * @param {number} milliseconds
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<void>}
+ */
+function waitForRetry(milliseconds, signal) {
+    const delay = Math.max(0, Math.floor(Number(milliseconds) || 0));
+    if (signal && signal.aborted) return Promise.reject(createAbortError());
+    if (delay === 0) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(createAbortError());
+        };
+        const timer = setTimeout(() => {
+            if (signal) signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, delay);
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
+
+/**
+ * 将 Retry-After 规范为有上限的毫秒延迟。
+ * @param {Response} response
+ * @param {number} retryNumber
+ * @returns {number}
+ */
+function retryAfterMilliseconds(response, retryNumber) {
+    const raw = response && response.headers && typeof response.headers.get === 'function'
+        ? String(response.headers.get('Retry-After') || '').trim()
+        : '';
+    let seconds = raw === '' ? NaN : Number(raw);
+    if (!Number.isFinite(seconds) || seconds < 0) {
+        const date = raw ? Date.parse(raw) : NaN;
+        seconds = Number.isFinite(date)
+            ? Math.max(0, (date - Date.now()) / 1000)
+            : Math.pow(2, Math.max(0, retryNumber - 1));
+    }
+    seconds = Math.max(0, Math.min(5, seconds));
+    return Math.ceil(seconds * 1000) + (seconds > 0 ? Math.floor(Math.random() * 251) : 0);
+}
+
+/**
+ * 创建有界异步任务队列。
+ * @param {number} limit
+ * @returns {{enqueue: Function, cancelPending: Function, stats: Function}}
+ */
+function createRequestQueue(limit) {
+    const concurrency = Math.max(1, Math.floor(Number(limit) || 1));
+    const waiting = [];
+    let active = 0;
+
+    const drain = () => {
+        while (active < concurrency && waiting.length > 0) {
+            const item = waiting.shift();
+            if (item.cancelled) continue;
+
+            item.started = true;
+            active++;
+            Promise.resolve()
+                .then(item.task)
+                .then(item.resolve, item.reject)
+                .finally(() => {
+                    active--;
+                    if (item.signal) item.signal.removeEventListener('abort', item.onAbort);
+                    drain();
+                });
+        }
+    };
+
+    return {
+        enqueue(task, signal) {
+            return new Promise((resolve, reject) => {
+                if (signal && signal.aborted) {
+                    reject(createAbortError());
+                    return;
+                }
+
+                const item = {
+                    task,
+                    signal,
+                    resolve,
+                    reject,
+                    started: false,
+                    cancelled: false,
+                    onAbort: null
+                };
+                item.onAbort = () => {
+                    if (item.started || item.cancelled) return;
+                    item.cancelled = true;
+                    reject(createAbortError());
+                };
+                if (signal) signal.addEventListener('abort', item.onAbort, { once: true });
+                waiting.push(item);
+                drain();
+            });
+        },
+        cancelPending() {
+            waiting.splice(0).forEach(item => {
+                if (item.cancelled) return;
+                item.cancelled = true;
+                if (item.signal) item.signal.removeEventListener('abort', item.onAbort);
+                item.reject(createAbortError());
+            });
+        },
+        stats() {
+            return { active, waiting: waiting.filter(item => !item.cancelled).length };
+        }
+    };
+}
+
+/**
+ * 创建可被 PJAX 生命周期取消的请求控制器
+ * @returns {AbortController}
+ */
+function createRequestController() {
+    const controller = new AbortController();
+    PandaBangumiRuntime.controllers.add(controller);
+    return controller;
+}
+
+/**
+ * 移除请求控制器
+ * @param {AbortController} controller
+ */
+function removeRequestController(controller) {
+    PandaBangumiRuntime.controllers.delete(controller);
+}
+
+/**
+ * 取消未完成请求
+ */
+function abortPendingRequests() {
+    PandaBangumiRuntime.controllers.forEach(controller => controller.abort());
+    PandaBangumiRuntime.controllers.clear();
+    PandaBangumiRuntime.requestQueue.cancelPending();
+    disconnectCoverLoading();
+}
+
+/**
+ * 判断 URL 是否为本站 PandaBangumi 路由。
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isLocalPandaBangumiUrl(value) {
+    if (!window.location || !window.bgmBase) return false;
+    try {
+        const url = new URL(value, window.location.href);
+        const base = new URL(String(window.bgmBase), window.location.href);
+        return url.origin === window.location.origin
+            && url.origin === base.origin
+            && url.pathname === base.pathname;
+    } catch (error) {
+        return false;
+    }
+}
+
+/**
+ * 加载图片资源，本站缓存封面进入共享队列。
+ * @param {HTMLImageElement} image
+ * @param {string} url
+ * @param {AbortSignal} signal
+ * @returns {Promise<void>}
+ */
+async function loadImageResource(image, url, signal) {
+    const load = () => new Promise((resolve, reject) => {
+        const cleanup = () => {
+            image.onload = null;
+            image.onerror = null;
+            signal.removeEventListener('abort', onAbort);
+        };
+        const onAbort = () => {
+            cleanup();
+            image.removeAttribute('src');
+            reject(createAbortError());
+        };
+        image.onload = () => {
+            cleanup();
+            resolve();
+        };
+        image.onerror = () => {
+            cleanup();
+            reject(new Error('封面加载失败'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+            onAbort();
+            return;
+        }
+        image.src = url;
+    });
+
+    const isLocal = isLocalPandaBangumiUrl(url);
+    const attempts = isLocal ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+            await (isLocal ? PandaBangumiRuntime.requestQueue.enqueue(load, signal) : load());
+            return;
+        } catch (error) {
+            if (isAbortError(error) || attempt + 1 >= attempts) throw error;
+            image.removeAttribute('src');
+            await waitForRetry(1000 + Math.floor(Math.random() * 251), signal);
+        }
+    }
+}
+
+/**
+ * 加载主封面，失败时尝试原图地址。
+ * @param {HTMLImageElement} image
+ * @param {string} url
+ * @param {string} fallbackUrl
+ * @param {AbortSignal} signal
+ * @returns {Promise<string>}
+ */
+async function loadImageWithFallback(image, url, fallbackUrl, signal) {
+    const candidates = [url, fallbackUrl].filter((candidate, index, values) => (
+        candidate && values.indexOf(candidate) === index
+    ));
+    let lastError = new Error('封面加载失败');
+
+    for (const candidate of candidates) {
+        try {
+            await loadImageResource(image, candidate, signal);
+            return candidate;
+        } catch (error) {
+            if (isAbortError(error)) throw error;
+            lastError = error;
+            image.removeAttribute('src');
+        }
+    }
+    throw lastError;
+}
+
+/**
+ * 校验 HTTPS 链接
+ * @param {string} value
+ * @returns {string}
+ */
+function safeHttpsUrl(value) {
+    const raw = String(value || '').trim();
+    try {
+        const url = new URL(raw);
+        return url.protocol === 'https:' ? url.href : '';
+    } catch (error) {
+        return '';
+    }
+}
+
+/**
+ * 校验 API 返回的图片 URL，不改写域名、协议或路径
+ * @param {string} value
+ * @returns {string}
+ */
+function safeImageUrl(value) {
+    const raw = String(value || '').trim();
+    try {
+        const url = new URL(raw);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+            return '';
+        }
+        return raw;
+    } catch (error) {
+        return '';
+    }
+}
+
+/**
+ * 标准化收藏分类
+ * @param {string} value
+ * @returns {'book'|'anime'|'music'|'game'|'real'}
+ */
+function normalizeCollectionCategory(value) {
+    const cate = String(value || '').toLowerCase();
+    return ['book', 'anime', 'music', 'game', 'real'].includes(cate) ? cate : 'anime';
+}
+
+var PandaBangumiCollectionTypes = {
+    anime: ['watching', 'watched'],
+    real: ['watching', 'watched'],
+    book: ['reading', 'read'],
+    game: ['playing', 'played'],
+    music: ['listening', 'listened']
+};
+
+/**
+ * 按条目分类标准化收藏状态名
+ * @param {string} value
+ * @param {string} cate
+ * @returns {'watching'|'watched'|'reading'|'read'|'playing'|'played'|'listening'|'listened'}
+ */
+function normalizeCollectionType(value, cate) {
+    const category = normalizeCollectionCategory(cate);
+    const types = PandaBangumiCollectionTypes[category];
+    const type = String(value || '').toLowerCase();
+    return types.includes(type) ? type : types[0];
+}
+
+/**
+ * 判断收藏状态是否为已完成
+ * @param {string} type
+ * @param {string} cate
+ * @returns {boolean}
+ */
+function isCompletedCollectionType(type, cate) {
+    const category = normalizeCollectionCategory(cate);
+    return normalizeCollectionType(type, category) === PandaBangumiCollectionTypes[category][1];
+}
+
+/**
+ * 构造本站日历封面地址
+ * @param {object} item
+ * @returns {string}
+ */
+function buildCalendarCoverUrl(item) {
+    const subjectId = Number(item && item.id);
+    const version = String(item && item.cover_version || '');
+    const base = String(window.bgmBase || '');
+    if (!Number.isInteger(subjectId) || subjectId <= 0 || !/^[a-f0-9]{16}$/.test(version) || !base) {
+        return '';
+    }
+
+    const separator = base.includes('?') ? '&' : '?';
+    return `${base}${separator}type=cover&id=${String(subjectId)}&v=${encodeURIComponent(version)}`;
+}
+
+/**
+ * 构造本站收藏列表封面地址
+ * @param {object} item
+ * @param {string} list
+ * @param {string} cate
+ * @returns {string}
+ */
+function buildCollectionCoverUrl(item, list, cate) {
+    const subjectId = Number(item && item.id);
+    const version = String(item && item.cover_version || '');
+    const normalizedCate = normalizeCollectionCategory(cate);
+    const normalizedList = normalizeCollectionType(list, normalizedCate);
+    const base = String(window.bgmBase || '');
+    if (
+        !Number.isInteger(subjectId)
+        || subjectId <= 0
+        || !/^[a-f0-9]{16}$/.test(version)
+        || !normalizedList
+        || !base
+    ) {
+        return '';
+    }
+
+    const separator = base.includes('?') ? '&' : '?';
+    return `${base}${separator}type=cover&scope=collection&list=${normalizedList}`
+        + `&cate=${normalizedCate}&id=${String(subjectId)}&v=${encodeURIComponent(version)}`;
+}
+
+/**
+ * 构造本站 Subject 卡片封面地址
+ * @param {object} data
+ * @param {number} subjectId
+ * @returns {string}
+ */
+function buildSubjectCoverUrl(data, subjectId) {
+    const version = String(data && data.cover_version || '');
+    const base = String(window.bgmBase || '');
+    if (!Number.isInteger(subjectId) || subjectId <= 0 || !/^[a-f0-9]{16}$/.test(version) || !base) {
+        return '';
+    }
+
+    const separator = base.includes('?') ? '&' : '?';
+    return `${base}${separator}type=cover&scope=subject&id=${String(subjectId)}`
+        + `&v=${encodeURIComponent(version)}`;
+}
+
+/**
+ * 完成单张背景封面的加载状态
+ * @param {HTMLElement} card
+ * @param {HTMLImageElement} image
+ * @param {'loaded'|'error'} state
+ */
+function finishPosterCoverLoad(card, image, state) {
+    const record = PandaBangumiRuntime.coverLoads.get(card);
+    if (!record || record.image !== image) return;
+
+    PandaBangumiRuntime.coverLoads.delete(card);
+    removeRequestController(record.controller);
+    card.classList.remove('is-cover-pending', 'is-cover-loading');
+    card.classList.add(state === 'loaded' ? 'is-cover-loaded' : 'is-cover-error');
+    card.dataset.coverState = state;
+    delete card.dataset.coverUrl;
+    delete card.dataset.coverFallbackUrl;
+}
+
+/**
+ * 预加载背景封面，成功后再应用到卡片
+ * @param {HTMLElement} card
+ */
+function loadPosterCover(card) {
+    if (!card || card.dataset.coverState === 'loading' || card.dataset.coverState === 'loaded') return;
+
+    const imageUrl = String(card.dataset.coverUrl || '');
+    const fallbackUrl = String(card.dataset.coverFallbackUrl || '');
+    const cover = card.querySelector('.bgm-poster-card__cover');
+    if (!imageUrl || !cover) {
+        card.classList.remove('is-cover-pending', 'is-cover-loading');
+        card.classList.add('is-cover-error');
+        card.dataset.coverState = 'error';
+        delete card.dataset.coverUrl;
+        delete card.dataset.coverFallbackUrl;
+        return;
+    }
+
+    if (PandaBangumiRuntime.coverObserver) {
+        PandaBangumiRuntime.coverObserver.unobserve(card);
+    }
+
+    card.dataset.coverState = 'loading';
+    card.classList.remove('is-cover-pending', 'is-cover-error');
+    card.classList.add('is-cover-loading');
+
+    const image = new Image();
+    image.decoding = 'async';
+    const controller = createRequestController();
+    const record = { image, controller };
+    PandaBangumiRuntime.coverLoads.set(card, record);
+    loadImageWithFallback(image, imageUrl, fallbackUrl, controller.signal).then(loadedImageUrl => {
+        const applyCover = () => {
+            if (!card.isConnected) {
+                if (PandaBangumiRuntime.coverLoads.get(card) === record) {
+                    PandaBangumiRuntime.coverLoads.delete(card);
+                    removeRequestController(controller);
+                }
+                return;
+            }
+            if (PandaBangumiRuntime.coverLoads.get(card) !== record) return;
+            cover.style.backgroundImage = `url("${loadedImageUrl}")`;
+            finishPosterCoverLoad(card, image, 'loaded');
+        };
+
+        if (typeof image.decode === 'function') {
+            image.decode().then(applyCover, applyCover);
+        } else {
+            applyCover();
+        }
+    }).catch(error => {
+        if (isAbortError(error)) {
+            if (PandaBangumiRuntime.coverLoads.get(card) === record) {
+                PandaBangumiRuntime.coverLoads.delete(card);
+                removeRequestController(controller);
+            }
+            return;
+        }
+        finishPosterCoverLoad(card, image, 'error');
+    });
+}
+
+/**
+ * 确认卡片当前仍处于封面预加载范围内
+ * @param {HTMLElement} card
+ * @returns {boolean}
+ */
+function isPosterCoverWithinRange(card) {
+    if (!card || !card.isConnected || card.getClientRects().length === 0) return false;
+
+    const rect = card.getBoundingClientRect();
+    const margin = PandaBangumiRuntime.coverPreloadMargin;
+    return rect.bottom >= -margin
+        && rect.top <= window.innerHeight + margin
+        && rect.right >= 0
+        && rect.left <= window.innerWidth;
+}
+
+/**
+ * 获取共享封面观察器
+ * @returns {IntersectionObserver|null}
+ */
+function getCoverObserver() {
+    if (!('IntersectionObserver' in window)) return null;
+    if (PandaBangumiRuntime.coverObserver) return PandaBangumiRuntime.coverObserver;
+
+    PandaBangumiRuntime.coverObserver = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting && isPosterCoverWithinRange(entry.target)) {
+                loadPosterCover(entry.target);
+            }
+        });
+    }, {
+        rootMargin: `${String(PandaBangumiRuntime.coverPreloadMargin)}px 0px`,
+        threshold: 0.01
+    });
+    return PandaBangumiRuntime.coverObserver;
+}
+
+/**
+ * 将封面卡片加入视口懒加载
+ * @param {HTMLElement} card
+ */
+function observePosterCover(card) {
+    if (!card || !card.dataset.coverUrl || card.dataset.coverState === 'loaded' || card.dataset.coverState === 'loading') return;
+
+    card.dataset.coverState = 'pending';
+    card.classList.add('is-cover-pending');
+    const observer = getCoverObserver();
+    if (observer) {
+        observer.observe(card);
+    } else {
+        loadPosterCover(card);
+    }
+}
+
+/**
+ * 停止当前页面的封面观察与预加载
+ */
+function disconnectCoverLoading() {
+    if (PandaBangumiRuntime.coverObserver) {
+        PandaBangumiRuntime.coverObserver.disconnect();
+        PandaBangumiRuntime.coverObserver = null;
+    }
+
+    PandaBangumiRuntime.coverLoads.forEach((record, card) => {
+        record.controller.abort();
+        record.image.onload = null;
+        record.image.onerror = null;
+        record.image.removeAttribute('src');
+        if (card.isConnected && card.dataset.coverUrl) {
+            card.dataset.coverState = 'pending';
+            card.classList.remove('is-cover-loading');
+            card.classList.add('is-cover-pending');
+        }
+    });
+    PandaBangumiRuntime.coverLoads.clear();
+}
+
+/**
+ * 激活指定星期面板的视口懒加载
+ * @param {HTMLElement} panel
+ */
+function loadCalendarPanelImages(panel) {
+    if (!panel) return;
+
+    panel.querySelectorAll('.bgm-poster-card[data-cover-url]').forEach(item => {
+        observePosterCover(item);
+    });
+}
+
+/**
+ * 等待批量内容完成布局
+ * @returns {Promise<void>}
+ */
+function waitForStableLayout() {
+    return new Promise(resolve => {
+        window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(resolve);
+        });
+    });
+}
+
+/**
+ * 仅在星期标签容器内横向居中指定标签，避免带动页面纵向滚动。
+ * @param {HTMLElement} tabs
+ * @param {HTMLElement} tab
+ */
+function centerCalendarTab(tabs, tab) {
+    if (!tabs || !tab) return;
+
+    const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+    if (maxScrollLeft === 0) return;
+
+    const tabsRect = tabs.getBoundingClientRect();
+    const tabRect = tab.getBoundingClientRect();
+    const centeredLeft = tabs.scrollLeft
+        + tabRect.left - tabsRect.left
+        - (tabs.clientWidth - tabRect.width) / 2;
+    const targetLeft = Math.max(0, Math.min(maxScrollLeft, centeredLeft));
+
+    if (typeof tabs.scrollTo === 'function') {
+        tabs.scrollTo({ left: targetLeft, behavior: 'smooth' });
+    } else {
+        tabs.scrollLeft = targetLeft;
+    }
+}
+
+/**
+ * 设置移动端星期选择器的展开状态
+ * @param {HTMLElement} picker
+ * @param {boolean} expanded
+ */
+function setWeekPickerExpanded(picker, expanded) {
+    if (!picker) return;
+
+    picker.classList.toggle('is-expanded', expanded);
+    const trigger = picker.querySelector('.cal-week-trigger');
+    if (trigger) {
+        trigger.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    }
+}
+
+/**
+ * 创建可在数据返回前显示的星期选择器。
+ * @param {number} todayId
+ * @returns {{header: HTMLDivElement, tabs: HTMLDivElement, getActiveTab: Function, getActivePanel: Function, setPanels: Function}}
+ */
+function createCalendarControls(todayId) {
+    const weekdays = [
+        { id: 1, shortName: '周一', fullName: '星期一' },
+        { id: 2, shortName: '周二', fullName: '星期二' },
+        { id: 3, shortName: '周三', fullName: '星期三' },
+        { id: 4, shortName: '周四', fullName: '星期四' },
+        { id: 5, shortName: '周五', fullName: '星期五' },
+        { id: 6, shortName: '周六', fullName: '星期六' },
+        { id: 7, shortName: '周日', fullName: '星期日' }
+    ];
+    const currentDayId = Number(todayId) >= 1 && Number(todayId) <= 7 ? Number(todayId) : 1;
+    const calendarHeader = document.createElement('div');
+    calendarHeader.className = 'bgm-calendar-header';
+
+    const weekPicker = document.createElement('div');
+    weekPicker.className = 'cal-week-picker';
+
+    const weekTrigger = document.createElement('button');
+    weekTrigger.className = 'cal-week-trigger';
+    weekTrigger.type = 'button';
+    weekTrigger.setAttribute('aria-expanded', 'false');
+
+    const weekTriggerLabel = document.createElement('span');
+    weekTriggerLabel.className = 'cal-week-trigger__label';
+    weekTrigger.appendChild(weekTriggerLabel);
+
+    const weekTriggerCount = document.createElement('span');
+    weekTriggerCount.className = 'cal-week-trigger__count';
+    weekTrigger.appendChild(weekTriggerCount);
+
+    const weekTriggerChevron = document.createElement('span');
+    weekTriggerChevron.className = 'cal-week-trigger__chevron';
+    weekTriggerChevron.setAttribute('aria-hidden', 'true');
+    weekTrigger.appendChild(weekTriggerChevron);
+
+    const tabs = document.createElement('div');
+    tabs.className = 'cal-tabs';
+    const tabButtons = [];
+    // 数据返回前为空，返回后按星期记录番剧数量
+    const dayCounts = new Map();
+    let activeTab = null;
+    let panels = null;
+
+    weekdays.forEach(day => {
+        const tabButton = document.createElement('button');
+        tabButton.className = 'cal-tab-button';
+        tabButton.type = 'button';
+        tabButton.textContent = day.shortName;
+        tabButton.title = day.fullName;
+        tabButton.setAttribute('aria-label', day.fullName);
+        tabButton.dataset.dayId = String(day.id);
+        if (day.id === currentDayId) {
+            tabButton.classList.add('active', 'is-today');
+            tabButton.setAttribute('aria-current', 'date');
+            tabButton.setAttribute('aria-pressed', 'true');
+            activeTab = tabButton;
+        } else {
+            tabButton.setAttribute('aria-pressed', 'false');
+        }
+        tabButtons.push(tabButton);
+        tabs.appendChild(tabButton);
+    });
+
+    const formatDayCount = count => (count > 0 ? `${String(count)} 部` : '暂无');
+    const updateTabStates = () => {
+        tabButtons.forEach((tabButton, index) => {
+            const day = weekdays[index];
+            const hasCount = dayCounts.has(day.id);
+            const count = dayCounts.get(day.id) || 0;
+            tabButton.classList.toggle('is-empty', hasCount && count === 0);
+            tabButton.setAttribute('aria-label', hasCount
+                ? `${day.fullName}，${formatDayCount(count)}`
+                : day.fullName);
+        });
+    };
+    const updateWeekTrigger = tabButton => {
+        if (!tabButton) return;
+        const day = weekdays[tabButtons.indexOf(tabButton)];
+        const countText = dayCounts.has(day.id) ? formatDayCount(dayCounts.get(day.id)) : '';
+        weekTriggerLabel.textContent = day.shortName;
+        weekTriggerCount.textContent = countText;
+        weekTrigger.setAttribute('aria-label', `选择星期，当前${day.fullName}${countText ? `，${countText}` : ''}`);
+        weekTrigger.classList.toggle('is-today', tabButton.classList.contains('is-today'));
+    };
+    const getActivePanel = () => {
+        if (!panels || !activeTab) return null;
+        return Array.from(panels.querySelectorAll('.cal-panel')).find(panel => (
+            panel.dataset.dayId === activeTab.dataset.dayId
+        )) || null;
+    };
+    const syncActivePanel = () => {
+        if (!panels || !activeTab) return;
+        panels.querySelectorAll('.cal-panel').forEach(panel => {
+            panel.classList.toggle('active', panel.dataset.dayId === activeTab.dataset.dayId);
+        });
+    };
+    const activateTab = tabButton => {
+        if (!tabButton) return;
+        tabButtons.forEach(button => {
+            const isActive = button === tabButton;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+        activeTab = tabButton;
+        updateWeekTrigger(activeTab);
+        syncActivePanel();
+        const activePanel = getActivePanel();
+        if (activePanel) loadCalendarPanelImages(activePanel);
+    };
+
+    updateWeekTrigger(activeTab);
+    weekTrigger.addEventListener('click', () => {
+        setWeekPickerExpanded(weekPicker, !weekPicker.classList.contains('is-expanded'));
+    });
+    tabs.addEventListener('click', event => {
+        if (!event.target.matches('.cal-tab-button')) return;
+        activateTab(event.target);
+        setWeekPickerExpanded(weekPicker, false);
+        if (window.matchMedia('(max-width: 480px)').matches) {
+            weekTrigger.focus({ preventScroll: true });
+        }
+    });
+
+    weekPicker.appendChild(weekTrigger);
+    weekPicker.appendChild(tabs);
+    calendarHeader.appendChild(weekPicker);
+
+    return {
+        header: calendarHeader,
+        tabs,
+        getActiveTab: () => activeTab,
+        getActivePanel,
+        setPanels(nextPanels) {
+            panels = nextPanels;
+            dayCounts.clear();
+            panels.querySelectorAll('.cal-panel').forEach(panel => {
+                dayCounts.set(Number(panel.dataset.dayId), panel.querySelectorAll('.bgm-poster-card').length);
+            });
+            syncActivePanel();
+            updateTabStates();
+            updateWeekTrigger(activeTab);
+        }
+    };
+}
+
+/**
+ * 创建封面卡片骨架，结构与正式卡片一致。
+ * @returns {HTMLSpanElement}
+ */
+function createPosterSkeleton() {
+    const card = document.createElement('span');
+    card.className = 'bgm-poster-card bgm-poster-card--skeleton is-cover-loading';
+    card.setAttribute('aria-hidden', 'true');
+
+    const overlay = document.createElement('span');
+    overlay.className = 'bgm-poster-card__overlay';
+    ['title', 'meta'].forEach(variant => {
+        const placeholder = document.createElement('span');
+        placeholder.className = `bgm-poster-card__placeholder bgm-poster-card__placeholder--${variant}`;
+        overlay.appendChild(placeholder);
+    });
+    card.appendChild(overlay);
+    return card;
+}
+
+/**
+ * 创建日历数据请求期间的占位骨架。
+ * @returns {HTMLDivElement}
+ */
+function createCalendarLoadingState() {
+    const state = document.createElement('div');
+    state.className = 'bgm-calendar-skeleton';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-label', '正在加载追番日历...');
+
+    const loadingText = document.createElement('span');
+    loadingText.className = 'bgm-calendar-skeleton__sr-only';
+    loadingText.textContent = '正在加载追番日历...';
+    state.appendChild(loadingText);
+
+    const grid = document.createElement('div');
+    grid.className = 'bgm-calendar-skeleton__grid';
+    grid.setAttribute('aria-hidden', 'true');
+    // 按最宽 4 列铺满一行，窄屏由 CSS 隐藏多余的骨架
+    for (let index = 0; index < 4; index++) {
+        grid.appendChild(createPosterSkeleton());
+    }
+    state.appendChild(grid);
+
+    return state;
+}
+
+/**
+ * 将日历容器切换为数据请求中的骨架状态。
+ * @param {HTMLElement} calContainer
+ * @param {HTMLElement} calendarHeader
+ * @returns {HTMLDivElement}
+ */
+function showCalendarLoading(calContainer, calendarHeader) {
+    calContainer.textContent = '';
+    calContainer.appendChild(calendarHeader);
+    const loadingState = createCalendarLoadingState();
+    calContainer.appendChild(loadingState);
+    calContainer.setAttribute('aria-busy', 'true');
+    return loadingState;
+}
+
+/**
+ * 获取 JSON 响应
+ * @param {string} url
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<any>}
+ */
+async function fetchJson(url, signal) {
+    const maxRetries = 2;
+    for (let retryNumber = 0; retryNumber <= maxRetries; retryNumber++) {
+        const response = await PandaBangumiRuntime.requestQueue.enqueue(
+            () => fetch(url, { signal }),
+            signal
+        );
+        if (response.ok) {
+            return response.json();
+        }
+
+        let payload = {};
+        try {
+            payload = await response.json();
+        } catch (error) {
+            payload = {};
+        }
+
+        if (response.status !== 429 || retryNumber >= maxRetries) {
+            const error = new Error(`HTTP ${response.status}`);
+            error.status = response.status;
+            error.code = typeof payload.error === 'string' ? payload.error : '';
+            error.retryAfter = Number(payload.retry_after || 0);
+            throw error;
+        }
+        await waitForRetry(retryAfterMilliseconds(response, retryNumber + 1), signal);
+    }
+
+    throw new Error('HTTP request retry exhausted');
+}
+
+/**
+ * 创建带重试操作的加载错误状态。
+ * @param {string} message
+ * @param {Function} retry
+ * @returns {HTMLDivElement}
+ */
+function createLoadError(message, retry) {
+    const state = document.createElement('div');
+    state.className = 'bgm-load-error';
+    state.setAttribute('role', 'status');
+
+    const text = document.createElement('p');
+    text.className = 'bgm-load-error__message';
+    text.textContent = message;
+    state.appendChild(text);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bgm-load-error__retry';
+    button.textContent = '重新加载';
+    button.addEventListener('click', retry);
+    state.appendChild(button);
+    return state;
+}
+
+/**
+ * 判断封面卡片是否展示收藏进度。
+ * @param {string} type
+ * @param {string} cate
+ * @param {boolean} hasProgress
+ * @returns {boolean}
+ */
+function shouldShowPosterProgress(type, cate, hasProgress) {
+    return type !== 'calendar'
+        && !isCompletedCollectionType(type, cate)
+        && cate !== 'game'
+        && hasProgress;
+}
+
+/**
+ * 创建通用封面卡片
+ * @param {object} item
+ * @param {{type: string, cate?: string, imageUrl?: string, fallbackImageUrl?: string, showProgress?: boolean}} options
+ * @returns {HTMLElement}
+ */
+function createPosterCard(item, options) {
+    const type = String(options && options.type || 'watched');
+    const cate = normalizeCollectionCategory(options && options.cate);
+    const href = safeHttpsUrl(item.url) || 'https://bgm.tv/';
+    const localImageUrl = buildCollectionCoverUrl(item, type, cate);
+    const requestedImageUrl = options && options.imageUrl
+        || localImageUrl
+        || item.img;
+    const imageUrl = safeImageUrl(requestedImageUrl);
+    const requestedFallbackUrl = options && options.fallbackImageUrl
+        || (!localImageUrl ? item.img_fallback : '');
+    const fallbackImageUrl = safeImageUrl(requestedFallbackUrl);
+    const name = String(item.name || '');
+    const displayName = String(item.name_cn || item.name || '');
+    const count = Number(item.count || 0);
+    const epStatus = Math.max(0, Number(item.status || 0));
+
+    const link = document.createElement('a');
+    link.className = `bgm-poster-card bgm-poster-card--${type}`;
+    link.dataset.id = String(item.id || '');
+    link.dataset.subjectType = cate;
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = name || displayName;
+
+    const cover = document.createElement('span');
+    cover.className = 'bgm-poster-card__cover';
+    if (imageUrl) {
+        link.dataset.coverUrl = imageUrl;
+        if (fallbackImageUrl && fallbackImageUrl !== imageUrl) {
+            link.dataset.coverFallbackUrl = fallbackImageUrl;
+        }
+        link.dataset.coverState = 'pending';
+        link.classList.add('is-cover-pending');
+    }
+    link.appendChild(cover);
+
+    const overlay = document.createElement('span');
+    overlay.className = 'bgm-poster-card__overlay';
+
+    const title = document.createElement('span');
+    title.className = 'bgm-poster-card__title';
+    title.textContent = displayName;
+
+    const isCalendar = type === 'calendar';
+    const airBadge = isCalendar ? getAirDateBadge(item.air_date) : '';
+    if (airBadge) {
+        const badge = document.createElement('span');
+        badge.className = 'bgm-poster-card__badge';
+        badge.textContent = airBadge;
+        link.appendChild(badge);
+    }
+
+    const score = Number(item.score || 0);
+    if ((isCalendar || isCompletedCollectionType(type, cate)) && Number.isFinite(score) && score > 0) {
+        const scoreEl = document.createElement('span');
+        scoreEl.className = 'bgm-poster-card__score';
+        scoreEl.textContent = `★ ${score.toFixed(1)}`;
+        overlay.appendChild(scoreEl);
+    }
+    overlay.appendChild(title);
+
+    const isBook = cate === 'book';
+    const isMusic = cate === 'music';
+    const current = isBook ? Math.max(0, Number(item.vol_status || 0)) : epStatus;
+    const totalCount = isBook ? Math.max(0, Number(item.vol_count || 0)) : count;
+    const hasProgress = !isBook || current > 0 || totalCount > 0;
+    const showCalendarProgress = isCalendar && Boolean(options && options.showProgress);
+    const doing = Math.max(0, Number(item.doing || 0));
+    let watchers = null;
+    if (isCalendar && doing > 0) {
+        watchers = document.createElement('span');
+        watchers.className = 'bgm-poster-card__meta';
+        watchers.textContent = formatWatcherText(doing);
+    }
+    if (shouldShowPosterProgress(type, cate, hasProgress) || showCalendarProgress) {
+        const total = totalCount > 0 ? String(totalCount) : '未知';
+        const unit = isBook ? ' 册' : isMusic ? ' 曲' : '';
+        const progressText = document.createElement('span');
+        progressText.className = 'bgm-poster-card__progress-text';
+        progressText.textContent = `${String(current)} / ${total}${unit}`;
+        if (watchers) {
+            // 进度与在看人数并排一行，卡片过窄时人数换到下一行
+            const stats = document.createElement('span');
+            stats.className = 'bgm-poster-card__stats';
+            stats.appendChild(progressText);
+            stats.appendChild(watchers);
+            overlay.appendChild(stats);
+        } else {
+            overlay.appendChild(progressText);
+        }
+
+        const progressTrack = document.createElement('span');
+        progressTrack.className = 'bgm-poster-card__progress-track';
+
+        const progressBar = document.createElement('span');
+        progressBar.className = 'bgm-poster-card__progress-bar';
+        progressBar.style.width = totalCount > 0 ? `${Math.min(100, current / totalCount * 100)}%` : '0';
+        progressTrack.appendChild(progressBar);
+        link.appendChild(progressTrack);
+    } else if (watchers) {
+        overlay.appendChild(watchers);
+    }
+
+    link.appendChild(overlay);
+    return link;
+}
+
+/**
+ * 首播前后 7 天内返回开播标记，其余返回空字符串。
+ * @param {string} value
+ * @returns {string}
+ */
+function getAirDateBadge(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+    if (!match) return '';
+    const airTime = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
+    if (!Number.isFinite(airTime)) return '';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.round((airTime - today.getTime()) / (24 * 60 * 60 * 1000));
+    if (days > 0 && days <= 7) return '即将开播';
+    if (days <= 0 && days > -7) return '新开播';
+    return '';
+}
+
+/**
+ * 格式化在看人数，万以上缩写。
+ * @param {number} value
+ * @returns {string}
+ */
+function formatWatcherText(value) {
+    return value >= 10000
+        ? `${(value / 10000).toFixed(1).replace(/\.0$/, '')} 万人在看`
+        : `${String(value)} 人在看`;
+}
+
+/**
+ * 设置列表操作卡状态
+ * @param {HTMLElement} action
+ * @param {'load'|'loading'|'retry'|'external'} state
+ */
+function setCollectionActionState(action, state) {
+    const states = {
+        load: { icon: '→', label: '加载更多' },
+        loading: { icon: '', label: '加载中' },
+        retry: { icon: '↻', label: '重新加载' },
+        external: { icon: '↗', label: '在 Bangumi 查看更多' }
+    };
+    const content = states[state] || states.load;
+
+    action.className = `bgm-collection-action bgm-collection-action--${state}`;
+    action.dataset.bgmState = state;
+    action.textContent = '';
+    action.setAttribute('aria-label', content.label);
+    if (action instanceof HTMLButtonElement) {
+        action.disabled = state === 'loading';
+        action.setAttribute('aria-busy', state === 'loading' ? 'true' : 'false');
+    }
+
+    const icon = document.createElement('span');
+    icon.className = 'bgm-collection-action__icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = content.icon;
+    action.appendChild(icon);
+
+    const label = document.createElement('span');
+    label.className = 'bgm-collection-action__label';
+    label.textContent = content.label;
+    action.appendChild(label);
+}
+
+/**
+ * 创建可加载或重试的操作卡
+ * @returns {HTMLButtonElement}
+ */
+function createCollectionActionButton() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    setCollectionActionState(button, 'loading');
+    button.addEventListener('click', () => loadMoreBgm(button));
+    return button;
+}
+
+/**
+ * 创建 Bangumi 收藏页链接卡
+ * @param {string} url
+ * @returns {HTMLAnchorElement|null}
+ */
+function createCollectionExternalLink(url) {
+    const href = safeHttpsUrl(url);
+    if (!href) return null;
+
+    const link = document.createElement('a');
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    setCollectionActionState(link, 'external');
+    return link;
+}
+
+/**
+ * 加载更多番剧条目
+ * @param {HTMLButtonElement} action
+ */
+async function loadMoreBgm(action) {
+    if (!action || action.dataset.bgmLoading === '1') return;
+    const listEl = action.closest('.bgm-collection');
+    if (!listEl) return;
+
+    const restoreState = action.dataset.bgmState === 'retry' ? 'retry' : 'load';
+    action.dataset.bgmLoading = '1';
+    setCollectionActionState(action, 'loading');
+
+    // 首屏还没有条目时用一行封面骨架代替转圈的操作卡
+    const skeletons = [];
+    if (!listEl.querySelector('.bgm-poster-card:not(.bgm-poster-card--skeleton)')) {
+        for (let index = 0; index < 4; index++) {
+            const skeleton = createPosterSkeleton();
+            skeletons.push(skeleton);
+            listEl.insertBefore(skeleton, action);
+        }
+        action.hidden = true;
+        listEl.setAttribute('aria-busy', 'true');
+    }
+    const clearSkeletons = () => {
+        if (skeletons.length === 0) return;
+        skeletons.splice(0).forEach(skeleton => skeleton.remove());
+        action.hidden = false;
+        listEl.setAttribute('aria-busy', 'false');
+    };
+
+    let offset = parseInt(listEl.dataset.bgmOffset || '0', 10);
+    if (Number.isNaN(offset) || offset < 0) {
+        offset = 0;
+    }
+
+    const cate = normalizeCollectionCategory(listEl.dataset.cate);
+    const type = normalizeCollectionType(listEl.dataset.type, cate);
+    const url = `${window.bgmBase}?from=${String(offset)}&type=${type}&cate=${cate}`;
+    const controller = createRequestController();
+
+    try {
+        const data = await fetchJson(url, controller.signal);
+        if (!action.isConnected || !listEl.isConnected) return;
+        if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean') {
+            throw new Error('返回的收藏分页数据无效');
+        }
+
+        const cards = [];
+        const fragment = document.createDocumentFragment();
+        data.items.forEach(item => {
+            const card = createPosterCard(item, { type, cate });
+            cards.push(card);
+            fragment.appendChild(card);
+        });
+        clearSkeletons();
+        listEl.insertBefore(fragment, action);
+        await waitForStableLayout();
+        cards.forEach(card => observePosterCover(card));
+
+        const nextOffset = Number(data.next_offset);
+        listEl.dataset.bgmOffset = String(Number.isInteger(nextOffset) && nextOffset >= offset
+            ? nextOffset
+            : offset + data.items.length);
+
+        if (data.has_more) {
+            setCollectionActionState(action, 'load');
+        } else {
+            const externalLink = createCollectionExternalLink(data.more_url);
+            if (externalLink) {
+                action.replaceWith(externalLink);
+            } else {
+                action.remove();
+            }
+        }
+    } catch (error) {
+        if (isAbortError(error)) {
+            if (action.isConnected) {
+                setCollectionActionState(action, restoreState);
+            }
+            return;
+        }
+        console.error('加载更多收藏失败:', error);
+        if (action.isConnected) {
+            setCollectionActionState(action, 'retry');
+        }
+    } finally {
+        clearSkeletons();
+        removeRequestController(controller);
+        delete action.dataset.bgmLoading;
+    }
+}
+
+/**
+ * 加载并渲染标签页式追番日历
+ * @param {HTMLElement} calContainer
+ */
+async function loadCalendar(calContainer) {
+    if (!calContainer || calContainer.dataset.bgmLoaded === '1' || calContainer.dataset.bgmLoading === '1') return;
+    calContainer.dataset.bgmLoading = '1';
+
+    const calFilter = calContainer.getAttribute('data-filter') === 'watching' ? 'watching' : 'all';
+    const url = `${window.bgmBase}?type=calendar&filter=${calFilter}`;
+    const controller = createRequestController();
+    const getTodayId = () => {
+        const jsDay = new Date().getDay();
+        return jsDay === 0 ? 7 : jsDay;
+    };
+    const calendarControls = createCalendarControls(getTodayId());
+    const loadingState = showCalendarLoading(calContainer, calendarControls.header);
+
+    try {
+        const data = await fetchJson(url, controller.signal);
+        if (!calContainer.isConnected) return;
+
+        if (!Array.isArray(data) || data.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'cal-no-item';
+            empty.textContent = '暂无日历数据';
+            loadingState.replaceWith(empty);
+            calContainer.dataset.bgmLoaded = '1';
+            calContainer.setAttribute('aria-busy', 'false');
+            return;
+        }
+
+        const panels = document.createElement('div');
+        panels.className = 'cal-panels';
+        const daysById = new Map(data.map(day => [Number(day.id), day]));
+        for (let dayNumber = 1; dayNumber <= 7; dayNumber++) {
+            const day = daysById.get(dayNumber) || {};
+            const dayId = String(dayNumber);
+            const panel = document.createElement('div');
+            panel.className = 'cal-panel';
+            panel.dataset.dayId = dayId;
+
+            const itemsArray = day.items ? Object.values(day.items) : [];
+            if (itemsArray.length > 0) {
+                itemsArray.forEach(item => {
+                    const title = String(item.name_cn || item.name || '');
+                    const href = safeHttpsUrl(item.url) || 'https://bgm.tv/';
+                    const imageUrl = buildCalendarCoverUrl(item) || safeImageUrl(item.img);
+                    const bangumiItem = createPosterCard({
+                        id: item.id,
+                        name: item.name,
+                        name_cn: title,
+                        url: href,
+                        img: item.img,
+                        img_fallback: item.img_fallback,
+                        score: item.score,
+                        doing: item.doing,
+                        air_date: item.air_date,
+                        status: item.status,
+                        count: item.count
+                    }, {
+                        type: 'calendar',
+                        imageUrl,
+                        fallbackImageUrl: item.img_fallback,
+                        // 只看在看时后端附带收视进度
+                        showProgress: calFilter === 'watching' && item.status !== undefined
+                    });
+                    panel.appendChild(bangumiItem);
+                });
+            } else {
+                const noItem = document.createElement('p');
+                noItem.className = 'cal-no-item';
+                noItem.textContent = dayNumber === getTodayId() ? '今天没有在追番哦～' : '这天没有在追番哦～';
+                panel.appendChild(noItem);
+            }
+            panels.appendChild(panel);
+        }
+
+        calendarControls.setPanels(panels);
+        loadingState.replaceWith(panels);
+
+        await waitForStableLayout();
+        loadCalendarPanelImages(calendarControls.getActivePanel());
+
+        const activeTab = calendarControls.getActiveTab();
+        if (activeTab && !window.matchMedia('(max-width: 480px)').matches) {
+            centerCalendarTab(calendarControls.tabs, activeTab);
+        }
+        calContainer.dataset.bgmLoaded = '1';
+        calContainer.setAttribute('aria-busy', 'false');
+    } catch (error) {
+        if (isAbortError(error)) return;
+        console.error('加载日历失败:', error);
+        if (calContainer.isConnected) {
+            const errorState = createLoadError('暂时无法加载日历。', () => {
+                delete calContainer.dataset.bgmLoaded;
+                loadCalendar(calContainer);
+            });
+            const currentContent = calContainer.querySelector('.bgm-calendar-skeleton, .cal-panels');
+            if (currentContent) currentContent.replaceWith(errorState);
+            else calContainer.appendChild(errorState);
+            delete calContainer.dataset.bgmLoaded;
+            calContainer.setAttribute('aria-busy', 'false');
+        }
+    } finally {
+        removeRequestController(controller);
+        delete calContainer.dataset.bgmLoading;
+    }
+}
+
+/**
+ * 加载 Bangumi 条目卡片信息
+ */
+async function loadBgmCard() {
+    const cards = document.querySelectorAll('.bgm-card:not([data-bgm-loaded="1"]):not([data-bgm-loading="1"])');
+
+    // 所有卡片立即显示骨架，实际请求并发由 requestQueue 控制。
+    await Promise.allSettled(Array.from(cards).map(card => {
+        const id = card.getAttribute('data-id');
+        return id ? renderCard(id, card) : Promise.resolve();
+    }));
+}
+
+const SUBJECT_TYPE_STORAGE_KEY = 'PandaBangumi:subjectTypes';
+const SUBJECT_TYPE_STORAGE_LIMIT = 200;
+
+/**
+ * 读取浏览器中记住的条目类型表
+ * @returns {Record<string, string>}
+ */
+function readRememberedSubjectTypes() {
+    try {
+        const stored = JSON.parse(window.localStorage.getItem(SUBJECT_TYPE_STORAGE_KEY) || '{}');
+        return stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+/**
+ * 获取此前渲染过的条目类型，用于选择对应的加载骨架
+ * @param {number} subjectId
+ * @returns {string}
+ */
+function getRememberedSubjectType(subjectId) {
+    const typeKey = readRememberedSubjectTypes()[String(subjectId)];
+    return typeof typeKey === 'string' && /^[a-z]+$/.test(typeKey) ? typeKey : '';
+}
+
+/**
+ * 记住条目类型，超出上限时淘汰最早写入的记录
+ * @param {number} subjectId
+ * @param {string} typeKey
+ */
+function rememberSubjectType(subjectId, typeKey) {
+    const types = readRememberedSubjectTypes();
+    const key = String(subjectId);
+    if (types[key] === typeKey) return;
+
+    delete types[key];
+    types[key] = typeKey;
+    const keys = Object.keys(types);
+    keys.slice(0, Math.max(0, keys.length - SUBJECT_TYPE_STORAGE_LIMIT)).forEach(oldKey => {
+        delete types[oldKey];
+    });
+    try {
+        window.localStorage.setItem(SUBJECT_TYPE_STORAGE_KEY, JSON.stringify(types));
+    } catch (error) {
+        // 隐私模式或存储被禁用时仅使用默认骨架。
+    }
+}
+
+/**
+ * 创建骨架占位元素，复用正式卡片的类名以继承相同的字号、行高与间距
+ * @param {string} tagName
+ * @param {string} className
+ * @param {string} [variant]
+ * @returns {HTMLElement}
+ */
+function createCardPlaceholder(tagName, className, variant) {
+    const placeholder = document.createElement(tagName);
+    placeholder.className = `${className} bgm-subject-card__placeholder`;
+    if (variant) placeholder.classList.add(`bgm-subject-card__placeholder--${variant}`);
+    placeholder.textContent = '​';
+    return placeholder;
+}
+
+/**
+ * 创建与正式卡片结构一致的加载骨架
+ * @param {string} [typeKey] 已知的条目类型；未知时使用通用卡片布局
+ * @returns {HTMLElement}
+ */
+function createCardLoadingState(typeKey) {
+    const isMusic = typeKey === 'music';
+    const loading = document.createElement('div');
+    loading.className = 'bgm-subject-card bgm-subject-card--skeleton';
+    loading.setAttribute('role', 'status');
+
+    const loadingText = document.createElement('span');
+    loadingText.className = 'bgm-subject-card__sr-only';
+    loadingText.textContent = '正在从 Bangumi 加载条目信息...';
+    loading.setAttribute('aria-label', loadingText.textContent);
+    loading.appendChild(loadingText);
+
+    const poster = document.createElement('div');
+    poster.className = 'bgm-subject-card__poster is-cover-loading';
+    if (isMusic) {
+        const obi = document.createElement('div');
+        obi.className = 'bgm-subject-card__obi';
+        loading.appendChild(obi);
+
+        const caseEl = document.createElement('div');
+        caseEl.className = 'bgm-subject-card__case';
+        caseEl.appendChild(poster);
+        loading.appendChild(caseEl);
+    } else {
+        loading.appendChild(poster);
+    }
+
+    const content = document.createElement('div');
+    content.className = 'bgm-subject-card__content';
+
+    const header = document.createElement('div');
+    header.className = 'bgm-subject-card__header';
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'bgm-subject-card__eyebrow';
+    eyebrow.appendChild(createCardPlaceholder('span', isMusic ? 'bgm-subject-card__kind' : 'bgm-subject-card__type'));
+    eyebrow.appendChild(createCardPlaceholder('span', 'bgm-subject-card__date'));
+    header.appendChild(eyebrow);
+    const rating = document.createElement('div');
+    rating.className = 'bgm-subject-card__rating';
+    rating.appendChild(createCardPlaceholder('span', 'bgm-subject-card__score'));
+    header.appendChild(rating);
+    content.appendChild(header);
+
+    content.appendChild(createCardPlaceholder('span', 'bgm-subject-card__title'));
+    content.appendChild(createCardPlaceholder('span', isMusic ? 'bgm-subject-card__credit' : 'bgm-subject-card__subtitle'));
+    content.appendChild(createCardPlaceholder('span', 'bgm-subject-card__summary'));
+
+    const footer = document.createElement('div');
+    footer.className = 'bgm-subject-card__footer';
+    footer.appendChild(createCardPlaceholder('span', isMusic ? 'bgm-subject-card__specs' : 'bgm-subject-card__meta'));
+    const tags = document.createElement('div');
+    tags.className = 'bgm-subject-card__tags';
+    ['short', 'long', 'short'].forEach(variant => {
+        tags.appendChild(createCardPlaceholder('span', 'bgm-subject-card__tag', variant));
+    });
+    footer.appendChild(tags);
+    content.appendChild(footer);
+    loading.appendChild(content);
+
+    return loading;
+}
+
+/**
+ * 根据 Subject ID 渲染 Bangumi 条目卡片
+ *
+ * @param {number|string} subjectId
+ * @param {HTMLElement} cardElement
+ */
+async function renderCard(subjectId, cardElement) {
+    if (!cardElement || cardElement.dataset.bgmLoaded === '1' || cardElement.dataset.bgmLoading === '1') return;
+
+    const safeSubjectId = parseInt(subjectId, 10);
+    const rememberedType = Number.isInteger(safeSubjectId) && safeSubjectId > 0
+        ? getRememberedSubjectType(safeSubjectId)
+        : '';
+    cardElement.dataset.bgmLoading = '1';
+    cardElement.setAttribute('aria-busy', 'true');
+    if (rememberedType) cardElement.dataset.subjectType = rememberedType;
+    else delete cardElement.dataset.subjectType;
+    cardElement.textContent = '';
+    cardElement.appendChild(createCardLoadingState(rememberedType));
+
+    if (!Number.isInteger(safeSubjectId) || safeSubjectId <= 0) {
+        renderCardError(cardElement, subjectId);
+        delete cardElement.dataset.bgmLoading;
+        return;
+    }
+    const controller = createRequestController();
+
+    try {
+        const data = await fetchJson(`${window.bgmBase}?type=subject&id=${String(safeSubjectId)}`, controller.signal);
+        if (!cardElement.isConnected) return;
+
+        if (data.id === safeSubjectId) {
+            cardElement.textContent = '';
+            const subjectCard = buildCardElement(data, safeSubjectId);
+            cardElement.dataset.subjectType = subjectCard.dataset.subjectType;
+            rememberSubjectType(safeSubjectId, subjectCard.dataset.subjectType);
+            cardElement.appendChild(subjectCard);
+            cardElement.dataset.bgmLoaded = '1';
+            cardElement.setAttribute('aria-busy', 'false');
+        } else {
+            throw new Error('返回的 Bangumi 条目数据无效');
+        }
+    } catch (error) {
+        if (isAbortError(error)) return;
+        console.error('Error fetching data:', error);
+        if (cardElement.isConnected) {
+            renderCardError(cardElement, subjectId, error);
+        }
+    } finally {
+        removeRequestController(controller);
+        delete cardElement.dataset.bgmLoading;
+    }
+}
+
+/**
+ * 渲染卡片错误状态
+ * @param {HTMLElement} cardElement
+ * @param {number|string} subjectId
+ * @param {Error} [error]
+ */
+function renderCardError(cardElement, subjectId, error) {
+    delete cardElement.dataset.bgmLoaded;
+    delete cardElement.dataset.bgmLoading;
+    delete cardElement.dataset.subjectType;
+    cardElement.setAttribute('aria-busy', 'false');
+    cardElement.textContent = '';
+    const message = error && error.code === 'not_found'
+        ? `未找到 Subject ID (${String(subjectId)})。`
+        : '暂时无法加载条目信息。';
+    const errorEl = createLoadError(message, () => renderCard(subjectId, cardElement));
+    errorEl.classList.add('bgm-subject-card-state', 'bgm-subject-card-state--error');
+    cardElement.appendChild(errorEl);
+}
+
+/**
+ * 从 infobox 数组中查找特定键的值
+ * @param {Array} infobox
+ * @param {string} key
+ * @returns {string}
+ */
+function findInfo(infobox, key) {
+    if (!Array.isArray(infobox)) return '';
+    const info = infobox.find(item => item && item.key === key);
+    if (!info || info.value === null || typeof info.value === 'undefined') return '';
+
+    const values = Array.isArray(info.value) ? info.value : [info.value];
+    return values.map(value => {
+        if (value === null || typeof value === 'undefined') return '';
+        if (typeof value === 'object') {
+            return String(value.v || value.k || '');
+        }
+        return String(value);
+    }).filter(Boolean).join('、');
+}
+
+/**
+ * 压缩 Subject 文本中的连续空白
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizeSubjectText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 为计数值补充单位
+ * @param {unknown} value
+ * @param {string} unit
+ * @returns {string}
+ */
+function formatSubjectCount(value, unit) {
+    const text = normalizeSubjectText(value);
+    if (!text) return '';
+    return text.endsWith(unit) ? text : `${text} ${unit}`;
+}
+
+/**
+ * 获取音乐条目的首要创作者或厂牌
+ * @param {Array} infobox
+ * @returns {{text: string, label: string, value: string}}
+ */
+function findMusicCredit(infobox) {
+    const keys = {
+        '艺术家': 'ARTIST',
+        '演唱': 'VOCALS',
+        '表演者': 'PERFORMER',
+        '主唱': 'VOCALS',
+        '作曲': 'COMPOSER',
+        '编曲': 'ARRANGER',
+        '厂牌': 'LABEL'
+    };
+    for (const [key, label] of Object.entries(keys)) {
+        const value = normalizeSubjectText(findInfo(infobox, key));
+        if (value) return { text: `${key} ${value}`, label, value };
+    }
+    return { text: '', label: '', value: '' };
+}
+
+/**
+ * 将 RGB 转为 HSL。
+ * @param {number} red
+ * @param {number} green
+ * @param {number} blue
+ * @returns {{hue: number, saturation: number, lightness: number}}
+ */
+function rgbToHsl(red, green, blue) {
+    const r = red / 255;
+    const g = green / 255;
+    const b = blue / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const lightness = (max + min) / 2;
+    const delta = max - min;
+    if (delta === 0) return { hue: 0, saturation: 0, lightness };
+
+    const saturation = delta / (1 - Math.abs(2 * lightness - 1));
+    let hue;
+    if (max === r) hue = ((g - b) / delta) % 6;
+    else if (max === g) hue = (b - r) / delta + 2;
+    else hue = (r - g) / delta + 4;
+    hue = ((hue * 60) + 360) % 360;
+    return { hue, saturation, lightness };
+}
+
+/**
+ * 将 HSL 转为 RGB。
+ * @param {number} hue
+ * @param {number} saturation
+ * @param {number} lightness
+ * @returns {number[]}
+ */
+function hslToRgb(hue, saturation, lightness) {
+    const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+    const segment = hue / 60;
+    const component = chroma * (1 - Math.abs((segment % 2) - 1));
+    const values = segment < 1 ? [chroma, component, 0]
+        : segment < 2 ? [component, chroma, 0]
+            : segment < 3 ? [0, chroma, component]
+                : segment < 4 ? [0, component, chroma]
+                    : segment < 5 ? [component, 0, chroma]
+                        : [chroma, 0, component];
+    const offset = lightness - chroma / 2;
+    return values.map(value => Math.round((value + offset) * 255));
+}
+
+/**
+ * 计算 RGB 的相对亮度。
+ * @param {number} red
+ * @param {number} green
+ * @param {number} blue
+ * @returns {number}
+ */
+function relativeLuminance(red, green, blue) {
+    const channels = [red, green, blue].map(value => {
+        const channel = value / 255;
+        return channel <= 0.04045
+            ? channel / 12.92
+            : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+}
+
+/**
+ * 从缩采样像素中选取适合作为白字背景的代表色。
+ * @param {ArrayLike<number>} pixels
+ * @returns {string}
+ */
+function pickMusicObiColor(pixels) {
+    const buckets = Array.from({ length: 18 }, () => ({ weight: 0, red: 0, green: 0, blue: 0 }));
+    for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index + 3] < 200) continue;
+        const red = pixels[index];
+        const green = pixels[index + 1];
+        const blue = pixels[index + 2];
+        const hsl = rgbToHsl(red, green, blue);
+        if (hsl.lightness < 0.07 || hsl.lightness > 0.93 || hsl.saturation < 0.14) continue;
+
+        const weight = (0.35 + hsl.saturation * 1.65)
+            * (1 - Math.abs(hsl.lightness - 0.5) * 0.8);
+        const bucket = buckets[Math.floor(hsl.hue / 20) % buckets.length];
+        bucket.weight += weight;
+        bucket.red += red * weight;
+        bucket.green += green * weight;
+        bucket.blue += blue * weight;
+    }
+
+    const winner = buckets.reduce((best, bucket) => bucket.weight > best.weight ? bucket : best);
+    if (winner.weight === 0) return '';
+
+    const average = [winner.red, winner.green, winner.blue]
+        .map(value => Math.round(value / winner.weight));
+    const hsl = rgbToHsl(average[0], average[1], average[2]);
+    const saturation = Math.min(0.7, Math.max(0.38, hsl.saturation));
+    let lightness = Math.min(0.4, Math.max(0.2, hsl.lightness));
+    let rgb = hslToRgb(hsl.hue, saturation, lightness);
+
+    while ((1.05 / (relativeLuminance(rgb[0], rgb[1], rgb[2]) + 0.05)) < 4.5 && lightness > 0.12) {
+        lightness -= 0.02;
+        rgb = hslToRgb(hsl.hue, saturation, lightness);
+    }
+    return `hsl(${Math.round(hsl.hue)}, ${Math.round(saturation * 100)}%, ${Math.round(lightness * 100)}%)`;
+}
+
+/**
+ * 仅对本站同源封面提取 Obi 颜色。
+ * @param {HTMLElement} card
+ * @param {HTMLImageElement} image
+ * @param {string} imageUrl
+ */
+function applyMusicObiColor(card, image, imageUrl) {
+    if (!card || !image || !imageUrl || !window.location) return;
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(imageUrl, window.location.href);
+    } catch (error) {
+        return;
+    }
+    if (parsedUrl.origin !== window.location.origin) return;
+
+    const cacheKey = parsedUrl.href;
+    const cached = PandaBangumiRuntime.musicObiColors.get(cacheKey);
+    if (cached) {
+        card.style.setProperty('--pb-music-obi-color', cached);
+        return;
+    }
+
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 24;
+        canvas.height = 24;
+        const context = canvas.getContext('2d');
+        if (!context) return;
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const color = pickMusicObiColor(context.getImageData(0, 0, canvas.width, canvas.height).data);
+        if (!color) return;
+        PandaBangumiRuntime.musicObiColors.set(cacheKey, color);
+        card.style.setProperty('--pb-music-obi-color', color);
+    } catch (error) {
+        // 直连图片或不支持 Canvas 的浏览器继续使用默认色。
+    }
+}
+
+/**
+ * 将 Bangumi Subject 数据标准化为卡片展示模型
+ * @param {object} data
+ * @param {number} subjectId
+ * @returns {object}
+ */
+function normalizeSubjectCardData(data, subjectId) {
+    const source = data && typeof data === 'object' ? data : {};
+    const typeNumber = Number(source.type || 0);
+    const typeConfig = {
+        1: { key: 'book', label: '书籍' },
+        2: { key: 'anime', label: '动画' },
+        3: { key: 'music', label: '音乐' },
+        4: { key: 'game', label: '游戏' },
+        6: { key: 'real', label: '三次元' }
+    }[typeNumber] || { key: 'unknown', label: '条目' };
+
+    const title = normalizeSubjectText(source.name_cn || source.name) || '未命名条目';
+    const originalTitle = source.name_cn ? normalizeSubjectText(source.name) : '';
+    const rating = source.rating && typeof source.rating === 'object' ? source.rating : {};
+    const scoreValue = Number(rating.score || 0);
+    const ratingCountValue = Number(rating.total);
+    const collectionCountValue = Number(source.collection && source.collection.collect);
+    let primaryMeta = '';
+    let secondaryMeta = '';
+    let musicCredit = { text: '', label: '', value: '' };
+
+    if (typeNumber === 1) {
+        const volumeCount = Number(source.volumes || 0);
+        const volumes = volumeCount > 0 ? String(volumeCount) : findInfo(source.infobox, '册数');
+        primaryMeta = formatSubjectCount(volumes, '册');
+    } else if (typeNumber === 2) {
+        primaryMeta = formatSubjectCount(
+            findInfo(source.infobox, '话数') || (Number(source.total_episodes || 0) > 0 ? source.total_episodes : ''),
+            '话'
+        );
+    } else if (typeNumber === 3) {
+        const trackCount = Number(source.total_episodes || 0);
+        primaryMeta = formatSubjectCount(
+            trackCount > 0 ? trackCount : findInfo(source.infobox, '曲目数量'),
+            '曲'
+        );
+        secondaryMeta = formatSubjectCount(findInfo(source.infobox, '碟片数量'), '碟');
+        musicCredit = findMusicCredit(source.infobox);
+    } else if (typeNumber === 4) {
+        primaryMeta = normalizeSubjectText(findInfo(source.infobox, '平台') || source.platform);
+    } else if (typeNumber === 6) {
+        primaryMeta = formatSubjectCount(
+            findInfo(source.infobox, '集数') || (Number(source.total_episodes || 0) > 0 ? source.total_episodes : ''),
+            '集'
+        );
+    }
+
+    const tags = [];
+    (Array.isArray(source.tags) ? source.tags : []).forEach(tag => {
+        const name = normalizeSubjectText(tag && tag.name);
+        if (name && !tags.includes(name) && tags.length < 3) tags.push(name);
+    });
+
+    return {
+        id: subjectId,
+        typeKey: typeConfig.key,
+        typeLabel: typeConfig.label,
+        title,
+        originalTitle: originalTitle !== title ? originalTitle : '',
+        summary: normalizeSubjectText(source.summary),
+        posterUrl: buildSubjectCoverUrl(source, subjectId)
+            || safeImageUrl(source.images && source.images.large),
+        posterFallbackUrl: safeImageUrl(source.img_fallback),
+        date: normalizeSubjectText(source.date),
+        score: Number.isFinite(scoreValue) && scoreValue > 0 ? scoreValue.toFixed(1) : '暂无评分',
+        hasScore: Number.isFinite(scoreValue) && scoreValue > 0,
+        ratingCount: Number.isFinite(ratingCountValue) && ratingCountValue >= 0
+            ? Math.floor(ratingCountValue)
+            : null,
+        collectionCount: Number.isFinite(collectionCountValue) && collectionCountValue >= 0
+            ? Math.floor(collectionCountValue)
+            : null,
+        primaryMeta,
+        secondaryMeta,
+        musicCredit: musicCredit.text,
+        musicCreditLabel: musicCredit.label,
+        musicCreditValue: musicCredit.value,
+        tags
+    };
+}
+
+/**
+ * 创建卡片元素
+ * @param {object} data
+ * @param {number} subjectId
+ * @returns {HTMLElement}
+ */
+function buildCardElement(data, subjectId) {
+    const cardData = normalizeSubjectCardData(data, subjectId);
+    const bangumiUrl = `https://bgm.tv/subject/${subjectId}`;
+    const isMusic = cardData.typeKey === 'music';
+
+    const wrapper = document.createElement('a');
+    wrapper.href = bangumiUrl;
+    wrapper.target = '_blank';
+    wrapper.rel = 'noopener noreferrer';
+    wrapper.className = 'bgm-subject-card';
+    wrapper.dataset.subjectType = cardData.typeKey;
+    wrapper.setAttribute('aria-label', `${cardData.typeLabel}《${cardData.title}》，在 Bangumi 查看`);
+
+    if (isMusic) {
+        const obi = document.createElement('div');
+        obi.className = 'bgm-subject-card__obi';
+        obi.setAttribute('aria-hidden', 'true');
+
+        const obiLabel = document.createElement('span');
+        obiLabel.className = 'bgm-subject-card__obi-label';
+        obiLabel.textContent = 'Music Album';
+        obi.appendChild(obiLabel);
+
+        const obiId = document.createElement('span');
+        obiId.className = 'bgm-subject-card__obi-id';
+        obiId.textContent = `BGM-${subjectId}`;
+        obi.appendChild(obiId);
+
+        const releaseYear = cardData.date.match(/^\d{4}/);
+        if (releaseYear) {
+            const obiYear = document.createElement('span');
+            obiYear.className = 'bgm-subject-card__obi-year';
+            obiYear.textContent = releaseYear[0];
+            obi.appendChild(obiYear);
+        }
+        wrapper.appendChild(obi);
+    }
+
+    const poster = document.createElement('div');
+    poster.className = 'bgm-subject-card__poster';
+    const img = document.createElement('img');
+    img.className = 'bgm-subject-card__image';
+    img.alt = `${cardData.title} 封面`;
+    img.loading = isLocalPandaBangumiUrl(cardData.posterUrl) ? 'eager' : 'lazy';
+    img.decoding = 'async';
+    if (cardData.posterUrl) {
+        poster.classList.add('is-cover-loading');
+        const controller = createRequestController();
+        loadImageWithFallback(
+            img,
+            cardData.posterUrl,
+            cardData.posterFallbackUrl,
+            controller.signal
+        ).then(loadedImageUrl => {
+            poster.classList.remove('is-cover-loading', 'is-cover-error');
+            poster.classList.add('is-cover-loaded');
+            if (isMusic) applyMusicObiColor(wrapper, img, loadedImageUrl);
+        }).catch(error => {
+            if (isAbortError(error)) return;
+            poster.classList.remove('is-cover-loading', 'is-cover-loaded');
+            poster.classList.add('is-cover-error');
+        }).finally(() => removeRequestController(controller));
+    } else {
+        poster.classList.add('is-cover-error');
+    }
+    poster.appendChild(img);
+    if (isMusic) {
+        const caseEl = document.createElement('div');
+        caseEl.className = 'bgm-subject-card__case';
+        caseEl.appendChild(poster);
+        wrapper.appendChild(caseEl);
+    } else {
+        wrapper.appendChild(poster);
+    }
+
+    const content = document.createElement('div');
+    content.className = 'bgm-subject-card__content';
+
+    const header = document.createElement('div');
+    header.className = 'bgm-subject-card__header';
+
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'bgm-subject-card__eyebrow';
+
+    const type = document.createElement('span');
+    type.className = isMusic ? 'bgm-subject-card__kind' : 'bgm-subject-card__type';
+    type.textContent = isMusic ? 'ALBUM' : cardData.typeLabel;
+    eyebrow.appendChild(type);
+
+    if (cardData.date) {
+        const date = document.createElement('time');
+        date.className = 'bgm-subject-card__date';
+        date.dateTime = cardData.date;
+        date.textContent = cardData.date;
+        eyebrow.appendChild(date);
+    }
+    header.appendChild(eyebrow);
+
+    const ratingArea = document.createElement('div');
+    ratingArea.className = 'bgm-subject-card__rating';
+
+    const scoreEl = document.createElement('span');
+    scoreEl.className = 'bgm-subject-card__score';
+    if (!cardData.hasScore) scoreEl.classList.add('is-empty');
+    scoreEl.textContent = cardData.score;
+    ratingArea.appendChild(scoreEl);
+
+    if (cardData.ratingCount !== null && cardData.hasScore) {
+        const ratingCountEl = document.createElement('span');
+        ratingCountEl.className = 'bgm-subject-card__rating-count';
+        ratingCountEl.textContent = `${cardData.ratingCount} 人评分`;
+        ratingArea.appendChild(ratingCountEl);
+    }
+
+    const external = document.createElement('span');
+    external.className = 'bgm-subject-card__external';
+    external.setAttribute('aria-hidden', 'true');
+    external.textContent = '↗';
+    ratingArea.appendChild(external);
+    header.appendChild(ratingArea);
+    content.appendChild(header);
+
+    const title = document.createElement('h3');
+    title.className = 'bgm-subject-card__title';
+    title.textContent = cardData.title;
+    content.appendChild(title);
+
+    if (isMusic && (cardData.musicCreditValue || cardData.originalTitle)) {
+        const credit = document.createElement('div');
+        credit.className = 'bgm-subject-card__credit';
+
+        const creditLabel = document.createElement('span');
+        creditLabel.className = 'bgm-subject-card__credit-label';
+        creditLabel.textContent = cardData.musicCreditLabel || 'ORIGINAL';
+        credit.appendChild(creditLabel);
+
+        const creditName = document.createElement('span');
+        creditName.className = 'bgm-subject-card__credit-name';
+        creditName.textContent = cardData.musicCreditValue || cardData.originalTitle;
+        credit.appendChild(creditName);
+        content.appendChild(credit);
+    } else if (cardData.originalTitle) {
+        const subtitle = document.createElement('p');
+        subtitle.className = 'bgm-subject-card__subtitle';
+        subtitle.textContent = cardData.originalTitle;
+        content.appendChild(subtitle);
+    }
+
+    if (cardData.summary) {
+        const summary = document.createElement('p');
+        summary.className = 'bgm-subject-card__summary';
+        summary.textContent = cardData.summary;
+        content.appendChild(summary);
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'bgm-subject-card__footer';
+
+    if (isMusic) {
+        const specs = document.createElement('div');
+        specs.className = 'bgm-subject-card__specs';
+        if (cardData.primaryMeta) appendMusicSpec(specs, 'TRACKS', cardData.primaryMeta, 'tracks');
+        if (cardData.secondaryMeta) appendMusicSpec(specs, 'DISCS', cardData.secondaryMeta, 'discs');
+        if (cardData.collectionCount !== null) {
+            appendMusicSpec(specs, 'COLLECTIONS', `${cardData.collectionCount} 人`, 'collection');
+        }
+        if (specs.childElementCount > 0) footer.appendChild(specs);
+    } else {
+        const meta = document.createElement('div');
+        meta.className = 'bgm-subject-card__meta';
+        if (cardData.primaryMeta) appendMetaItem(meta, cardData.primaryMeta, 'primary');
+        if (cardData.secondaryMeta) appendMetaItem(meta, cardData.secondaryMeta, 'secondary');
+        if (cardData.collectionCount !== null) {
+            appendMetaItem(meta, `${cardData.collectionCount} 人收藏`, 'collection');
+        }
+        if (meta.childElementCount > 0) footer.appendChild(meta);
+    }
+
+    if (cardData.tags.length > 0) {
+        const tags = document.createElement('div');
+        tags.className = 'bgm-subject-card__tags';
+        cardData.tags.forEach(tag => {
+            const tagEl = document.createElement('span');
+            tagEl.className = 'bgm-subject-card__tag';
+            tagEl.textContent = tag;
+            tags.appendChild(tagEl);
+        });
+        footer.appendChild(tags);
+    }
+
+    content.appendChild(footer);
+    wrapper.appendChild(content);
+    return wrapper;
+}
+
+/**
+ * 追加音乐专辑规格。
+ * @param {HTMLElement} container
+ * @param {string} label
+ * @param {string} value
+ * @param {string} kind
+ */
+function appendMusicSpec(container, label, value, kind) {
+    const spec = document.createElement('span');
+    spec.className = `bgm-subject-card__spec bgm-subject-card__spec--${kind}`;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'bgm-subject-card__spec-label';
+    labelEl.textContent = label;
+    spec.appendChild(labelEl);
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'bgm-subject-card__spec-value';
+    valueEl.textContent = value;
+    spec.appendChild(valueEl);
+    container.appendChild(spec);
+}
+
+/**
+ * 追加元信息
+ * @param {HTMLElement} container
+ * @param {string} text
+ * @param {string} [kind]
+ */
+function appendMetaItem(container, text, kind) {
+    const item = document.createElement('span');
+    item.className = 'bgm-subject-card__meta-item';
+    if (kind) item.classList.add(`bgm-subject-card__meta-item--${kind}`);
+    item.textContent = String(text);
+    container.appendChild(item);
+}
+
+/**
+ * 初始化所有番剧列表
+ */
+async function initCollection() {
+    const initialLoads = [];
+    Array.from(document.querySelectorAll('.bgm-collection:not([data-bgm-initialized="1"])')).forEach(item => {
+        item.dataset.bgmInitialized = '1';
+        item.dataset.bgmOffset = '0';
+        item.dataset.cate = normalizeCollectionCategory(item.dataset.cate);
+        item.dataset.type = normalizeCollectionType(item.dataset.type, item.dataset.cate);
+
+        const action = createCollectionActionButton();
+        item.appendChild(action);
+        initialLoads.push(loadMoreBgm(action));
+    });
+
+    document.querySelectorAll('.bgm-calendar').forEach(calendar => {
+        initialLoads.push(loadCalendar(calendar));
+    });
+
+    initialLoads.push(loadBgmCard());
+    await Promise.allSettled(initialLoads);
+}
+
+/**
+ * 防抖调度初始化
+ */
+function scheduleInit() {
+    if (PandaBangumiRuntime.initTimer) {
+        clearTimeout(PandaBangumiRuntime.initTimer);
+    }
+    PandaBangumiRuntime.initTimer = setTimeout(() => {
+        PandaBangumiRuntime.initTimer = null;
+        initCollection();
+    }, 30);
+}
+
+PandaBangumiRuntime.init = scheduleInit;
+
+if (!PandaBangumiRuntime.bound) {
+    PandaBangumiRuntime.bound = true;
+
+    ['DOMContentLoaded', 'pjax:complete', 'pjax:end', 'pjax:success', 'turbo:load', 'turbolinks:load'].forEach(eventName => {
+        document.addEventListener(eventName, scheduleInit);
+    });
+
+    ['pjax:send', 'pjax:beforeReplace', 'turbo:before-render'].forEach(eventName => {
+        document.addEventListener(eventName, abortPendingRequests);
+    });
+
+    document.addEventListener('click', event => {
+        document.querySelectorAll('.cal-week-picker.is-expanded').forEach(picker => {
+            if (!picker.contains(event.target)) {
+                setWeekPickerExpanded(picker, false);
+            }
+        });
+    });
+
+    document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+
+        document.querySelectorAll('.cal-week-picker.is-expanded').forEach(picker => {
+            setWeekPickerExpanded(picker, false);
+            const trigger = picker.querySelector('.cal-week-trigger');
+            if (trigger) trigger.focus({ preventScroll: true });
+        });
+    });
+
+    if (document.readyState !== 'loading') {
+        scheduleInit();
+    }
+}

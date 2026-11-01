@@ -1,0 +1,1528 @@
+/* 共享设计变量：条目卡片、收藏列表与日历取同一套值，夜间模式只覆盖变量 */
+.bgm-collection,
+.bgm-calendar,
+.bgm-card {
+    --pb-subject-bg: #ffffff;
+    --pb-subject-border: rgba(0, 0, 0, 0.06);
+    /* 卡片为实色底，文字色需固定，不能继承主题（深色主题下会变成浅字白底） */
+    --pb-subject-text: #24292f;
+    --pb-subject-muted: currentColor;
+    --pb-subject-accent: #c65f76;
+    --pb-subject-skeleton: rgba(127, 127, 127, 0.16);
+    --pb-poster-radius: 10px;
+    --pb-panel-radius: 14px;
+    --pb-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+    --pb-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.05), 0 14px 32px rgba(0, 0, 0, 0.1);
+    --pb-control-bg: rgba(127, 127, 127, 0.1);
+    --pb-control-active: #ffffff;
+    --pb-dashed-border: rgba(127, 127, 127, 0.32);
+}
+
+.bgm-collection[data-cate='book'],
+.bgm-card[data-subject-type='book'] {
+    --pb-subject-accent: #3f8b70;
+}
+
+.bgm-collection[data-cate='game'],
+.bgm-card[data-subject-type='game'] {
+    --pb-subject-accent: #4f78b8;
+}
+
+.bgm-collection[data-cate='real'],
+.bgm-card[data-subject-type='real'] {
+    --pb-subject-accent: #967343;
+}
+
+.bgm-collection[data-cate='music'] {
+    --pb-subject-accent: #9a405d;
+}
+
+/* 通用封面卡片与网格 */
+.bgm-collection,
+.cal-panel.active,
+.bgm-calendar-skeleton__grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 15px;
+    width: 100%;
+}
+
+.bgm-collection {
+    margin: 0 auto;
+}
+
+.bgm-poster-card {
+    position: relative;
+    display: block;
+    width: 100%;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border: none !important;
+    border-radius: var(--pb-poster-radius);
+    background: var(--pb-subject-skeleton);
+    box-shadow: var(--pb-shadow);
+    color: #fff !important;
+    text-decoration: none !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.bgm-collection[data-cate='music'] .bgm-poster-card,
+.bgm-collection[data-cate='music'] .bgm-collection-action {
+    aspect-ratio: 1 / 1;
+}
+
+.bgm-poster-card::before,
+.bgm-card .bgm-subject-card__poster::after {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    background: linear-gradient(105deg, transparent 28%, rgba(255, 255, 255, 0.52) 45%, transparent 62%);
+    background-size: 220% 100%;
+    transition: opacity 0.2s ease;
+}
+
+.bgm-poster-card.is-cover-loading::before,
+.bgm-card .bgm-subject-card__poster.is-cover-loading::after {
+    opacity: 1;
+    animation: bgmCoverShimmer 1.35s ease-in-out infinite;
+}
+
+.bgm-poster-card__cover {
+    position: absolute;
+    inset: 0;
+    display: block;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+    opacity: 0;
+    transform: scale(1);
+    transition: opacity 0.22s ease, transform 0.3s ease;
+}
+
+.bgm-poster-card.is-cover-loaded .bgm-poster-card__cover {
+    opacity: 1;
+}
+
+.bgm-poster-card__overlay {
+    position: absolute;
+    z-index: 2;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    min-height: 34%;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 2.75rem 0.65rem 0.65rem;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.52) 55%, transparent);
+    color: #fff;
+    text-align: left;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+    transition: opacity 0.2s ease;
+}
+
+.bgm-poster-card__title {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.bgm-poster-card__score {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: #ffd166;
+    font-size: 0.75rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.bgm-poster-card__badge {
+    position: absolute;
+    z-index: 3;
+    top: 8px;
+    left: 8px;
+    padding: 0.12rem 0.5rem;
+    border-radius: 999px;
+    background: var(--pb-subject-accent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.bgm-poster-card__progress-text,
+.bgm-poster-card__meta {
+    display: block;
+    margin-top: 0.3rem;
+    font-size: 0.75rem;
+    line-height: 1.2;
+    opacity: 0.86;
+}
+
+.bgm-poster-card__stats {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    margin-top: 0.3rem;
+    column-gap: 0.5rem;
+}
+
+.bgm-poster-card__stats .bgm-poster-card__progress-text,
+.bgm-poster-card__stats .bgm-poster-card__meta {
+    margin-top: 0;
+    white-space: nowrap;
+}
+
+.bgm-poster-card__progress-track {
+    position: absolute;
+    z-index: 3;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: block;
+    height: 3px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.35);
+    transition: opacity 0.2s ease;
+}
+
+.bgm-poster-card__progress-bar {
+    display: block;
+    height: 100%;
+    background: var(--pb-subject-accent);
+}
+
+.bgm-poster-card:focus-visible {
+    outline: 3px solid var(--pb-subject-accent);
+    outline-offset: 3px;
+}
+
+/* 骨架沿用封面卡片结构，只把标题换成色条 */
+.bgm-poster-card--skeleton .bgm-poster-card__overlay {
+    gap: 0.45rem;
+    background: none;
+}
+
+.bgm-poster-card__placeholder {
+    display: block;
+    height: 0.68rem;
+    border-radius: 999px;
+    background: var(--pb-subject-skeleton);
+    animation: bgmSkeletonPulse 1.35s ease-in-out infinite;
+}
+
+.bgm-poster-card__placeholder--title {
+    width: 72%;
+}
+
+.bgm-poster-card__placeholder--meta {
+    width: 38%;
+    height: 0.56rem;
+}
+
+.bgm-collection-action {
+    display: flex;
+    width: 100%;
+    aspect-ratio: 2 / 3;
+    align-items: center;
+    appearance: none;
+    background: var(--pb-subject-bg);
+    border: 1px solid var(--pb-subject-border) !important;
+    border-radius: var(--pb-poster-radius);
+    box-shadow: var(--pb-shadow);
+    box-sizing: border-box;
+    color: var(--pb-subject-text) !important;
+    cursor: pointer;
+    flex-direction: column;
+    font: inherit;
+    justify-content: center;
+    padding: 1rem;
+    text-align: center;
+    text-decoration: none !important;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.bgm-collection-action:disabled {
+    cursor: wait;
+}
+
+.bgm-collection-action[hidden] {
+    display: none;
+}
+
+.bgm-collection-action__icon {
+    display: flex;
+    width: 44px;
+    height: 44px;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 0.75rem;
+    border-radius: 50%;
+    background: rgba(127, 127, 127, 0.12);
+    background: color-mix(in srgb, var(--pb-subject-accent) 13%, transparent);
+    color: var(--pb-subject-accent);
+    font-size: 1.3rem;
+    line-height: 1;
+    transition: transform 0.2s ease;
+}
+
+.bgm-collection-action__label {
+    max-width: 100%;
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.5;
+    opacity: 0.72;
+}
+
+.bgm-collection-action--loading .bgm-collection-action__icon {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--pb-subject-skeleton);
+    border-top-color: var(--pb-subject-accent);
+    background: transparent;
+    animation: bgmActionSpin 0.8s linear infinite;
+}
+
+.bgm-collection-action:focus-visible {
+    outline: 3px solid var(--pb-subject-accent);
+    outline-offset: 3px;
+}
+
+@keyframes bgmActionSpin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes bgmSkeletonPulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.55;
+    }
+}
+
+@keyframes bgmCoverShimmer {
+    from {
+        background-position: 130% 0;
+    }
+
+    to {
+        background-position: -130% 0;
+    }
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .bgm-poster-card:not(.bgm-poster-card--skeleton):hover {
+        transform: translateY(-3px);
+        box-shadow: var(--pb-shadow-hover);
+    }
+
+    .bgm-poster-card:hover .bgm-poster-card__cover {
+        transform: scale(1.04);
+    }
+
+    .bgm-poster-card:not(.bgm-poster-card--skeleton):hover .bgm-poster-card__overlay,
+    .bgm-poster-card:hover .bgm-poster-card__progress-track {
+        opacity: 0;
+    }
+
+    .bgm-collection-action:not(:disabled):hover {
+        transform: translateY(-3px);
+        box-shadow: var(--pb-shadow-hover);
+    }
+
+    .bgm-collection-action:not(:disabled):hover .bgm-collection-action__icon {
+        transform: scale(1.06);
+    }
+}
+
+@media screen and (max-width: 768px) {
+    .bgm-collection,
+    .cal-panel.active,
+    .bgm-calendar-skeleton__grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    /* 骨架只铺满一行 */
+    .bgm-poster-card--skeleton:nth-child(n + 4) {
+        display: none;
+    }
+}
+
+@media screen and (max-width: 450px) {
+    .bgm-collection,
+    .cal-panel.active,
+    .bgm-calendar-skeleton__grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+    }
+
+    .bgm-poster-card--skeleton:nth-child(n + 3) {
+        display: none;
+    }
+
+    .bgm-poster-card__overlay {
+        padding-right: 0.55rem;
+        padding-left: 0.55rem;
+    }
+}
+
+/* 追番日历 */
+.bgm-calendar {
+    margin: 30px auto;
+}
+
+/* 主题自带分区标题，星期切换作为控件靠右 */
+.bgm-calendar-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.cal-week-picker {
+    min-width: 0;
+}
+
+.cal-week-trigger {
+    display: none;
+}
+
+.cal-tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    max-width: 100%;
+    overflow-x: auto;
+    justify-content: flex-end;
+    width: max-content;
+    padding: 3px;
+    border: none;
+    border-radius: 999px;
+    background: var(--pb-control-bg);
+    margin: 0;
+    gap: 0.15rem;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.cal-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.cal-tab-button {
+    position: relative;
+    flex-shrink: 0;
+    padding: 0.4rem 0.8rem;
+    border: none;
+    border-radius: 999px;
+    background: none;
+    color: inherit;
+    color: color-mix(in srgb, currentColor 68%, transparent);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+    line-height: 1.4;
+    transition: color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.cal-tab-button.active {
+    background: var(--pb-control-active);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    color: var(--pb-subject-text);
+    font-weight: 600;
+}
+
+/* 今天用强调色圆点标记，不再改变文字颜色 */
+.cal-tab-button.is-today::after {
+    content: '';
+    position: absolute;
+    bottom: 3px;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--pb-subject-accent);
+    transform: translateX(-50%);
+}
+
+.cal-tab-button:focus-visible {
+    outline: 2px solid var(--pb-subject-accent);
+    outline-offset: 1px;
+}
+
+/* 没有番剧的日子仍可点击，只是淡化 */
+.cal-tab-button.is-empty:not(.active) {
+    opacity: 0.45;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .cal-tab-button:not(.active):hover {
+        color: inherit;
+    }
+}
+
+.cal-panels {
+    position: relative;
+}
+
+.cal-panel {
+    display: none;
+    animation: bgmFadeIn 0.35s ease;
+}
+
+.bgm-calendar-skeleton {
+    width: 100%;
+}
+
+.bgm-calendar-skeleton__sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+@keyframes bgmFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media screen and (max-width: 480px) {
+    .bgm-calendar-header {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 0.7rem;
+    }
+
+    .cal-week-picker {
+        display: block;
+        width: 100%;
+    }
+
+    .cal-week-trigger {
+        display: flex;
+        min-width: 112px;
+        max-width: 100%;
+        align-items: center;
+        justify-content: center;
+        gap: 0.65rem;
+        margin: 0 auto;
+        padding: 0.5rem 1.1rem;
+        border: none;
+        border-radius: 999px;
+        background: var(--pb-control-bg);
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+
+    .cal-week-trigger.is-today .cal-week-trigger__label::before {
+        content: '';
+        display: inline-block;
+        width: 5px;
+        height: 5px;
+        margin-right: 0.45rem;
+        border-radius: 50%;
+        background: var(--pb-subject-accent);
+        vertical-align: middle;
+        transform: translateY(-1px);
+    }
+
+    .cal-week-trigger__count {
+        font-size: 0.8rem;
+        font-variant-numeric: tabular-nums;
+        font-weight: 500;
+        opacity: 0.6;
+    }
+
+    .cal-week-trigger__count:empty {
+        display: none;
+    }
+
+    .cal-week-trigger:focus-visible {
+        outline: 3px solid var(--pb-subject-accent);
+        outline-offset: 3px;
+    }
+
+    .cal-week-trigger__chevron {
+        width: 7px;
+        height: 7px;
+        border-right: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+        opacity: 0.6;
+        transform: rotate(45deg) translate(-1px, -1px);
+        transform-origin: center;
+        animation: calWeekHint 0.75s ease-in-out 0.65s 2;
+        transition: transform 0.2s ease;
+    }
+
+    .cal-week-picker.is-expanded .cal-week-trigger__chevron {
+        animation: none;
+        transform: rotate(225deg) translate(-1px, -1px);
+    }
+
+    .cal-tabs {
+        display: grid;
+        width: 100%;
+        max-width: none;
+        max-height: 0;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 0;
+        box-sizing: border-box;
+        visibility: hidden;
+        overflow: hidden;
+        margin: 0 auto;
+        padding: 0 3px;
+        opacity: 0;
+        transform: translateY(-6px);
+        transition: max-height 0.22s ease, margin-top 0.22s ease, padding 0.22s ease, opacity 0.18s ease, transform 0.22s ease, visibility 0s linear 0.22s;
+    }
+
+    .cal-week-picker.is-expanded .cal-tabs {
+        max-height: 64px;
+        visibility: visible;
+        margin-top: 0.55rem;
+        padding: 3px;
+        opacity: 1;
+        transform: translateY(0);
+        transition-delay: 0s;
+    }
+
+    .cal-tab-button {
+        min-width: 0;
+        padding: 0.48rem 0.05rem;
+        font-size: 0.78rem;
+    }
+}
+
+@keyframes calWeekHint {
+    0%, 100% {
+        transform: rotate(45deg) translate(-1px, -1px);
+    }
+
+    50% {
+        transform: rotate(45deg) translate(2px, 2px);
+    }
+}
+
+.cal-no-item {
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: 2.5rem 1rem;
+    border: 1px dashed var(--pb-dashed-border);
+    border-radius: var(--pb-panel-radius);
+    color: inherit;
+    color: color-mix(in srgb, currentColor 55%, transparent);
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+.bgm-load-error {
+    display: grid;
+    justify-items: center;
+    gap: 0.75rem;
+    padding: 2rem 1rem;
+    border: 1px dashed rgba(181, 74, 74, 0.35);
+    border-radius: var(--pb-panel-radius);
+    color: #b54a4a;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+.bgm-load-error__message {
+    margin: 0;
+}
+
+.bgm-load-error__retry {
+    appearance: none;
+    padding: 0.4rem 1rem;
+    border: 1px solid var(--pb-subject-border);
+    border-radius: 999px;
+    background: var(--pb-subject-bg);
+    box-shadow: var(--pb-shadow);
+    color: var(--pb-subject-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.bgm-load-error__retry:focus-visible {
+    outline: 3px solid var(--pb-subject-accent);
+    outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .bgm-load-error__retry:hover {
+        transform: translateY(-1px);
+        box-shadow: var(--pb-shadow-hover);
+    }
+}
+
+/* --- Bangumi 单部 Subject 卡片 --- */
+.bgm-card {
+    --pb-card-poster-width: 104px;
+    --pb-card-min-height: 176px;
+    --pb-card-padding: 0.25rem 0.55rem 0.2rem 0.85rem;
+    display: block;
+    width: 100%;
+    max-width: 720px;
+    margin: 1.75rem auto !important;
+    color: var(--pb-subject-text);
+}
+
+.bgm-card,
+.bgm-card * {
+    box-sizing: border-box;
+}
+
+.bgm-card[data-subject-type='music'] {
+    --pb-subject-accent: #9a405d;
+    --pb-music-obi-color: var(--pb-subject-accent);
+    --pb-card-min-height: 196px;
+}
+
+.bgm-card[data-subject-type='unknown'] {
+    --pb-subject-accent: #72777f;
+}
+
+.bgm-card .bgm-subject-card {
+    display: grid !important;
+    width: 100%;
+    min-width: 0;
+    min-height: var(--pb-card-min-height);
+    grid-template-columns: var(--pb-card-poster-width) minmax(0, 1fr);
+    overflow: hidden;
+    padding: 10px;
+    border: 1px solid var(--pb-subject-border) !important;
+    border-radius: 14px;
+    background: var(--pb-subject-bg);
+    box-shadow: var(--pb-shadow);
+    color: var(--pb-subject-text) !important;
+    font-family: inherit;
+    text-decoration: none !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .bgm-card .bgm-subject-card:hover {
+        box-shadow: var(--pb-shadow-hover);
+        transform: translateY(-3px);
+    }
+
+    .bgm-card .bgm-subject-card:hover .bgm-subject-card__external {
+        color: var(--pb-subject-accent);
+        opacity: 1;
+        transform: translate(1px, -1px);
+    }
+}
+
+.bgm-card .bgm-subject-card:focus-visible {
+    outline: 3px solid var(--pb-subject-accent);
+    outline-offset: 3px;
+}
+
+.bgm-card .bgm-subject-card__poster {
+    position: relative;
+    width: var(--pb-card-poster-width);
+    min-height: calc(var(--pb-card-poster-width) * 1.5);
+    align-self: stretch;
+    overflow: hidden;
+    border-radius: 9px;
+    background: rgba(127, 127, 127, 0.16);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
+}
+
+.bgm-card .bgm-subject-card__obi {
+    display: none;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card {
+    grid-template-columns: 30px 176px minmax(0, 1fr);
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    align-self: stretch;
+    justify-content: space-between;
+    padding: 0.65rem 0;
+    overflow: hidden;
+    border-radius: 6px 0 0 6px;
+    background: var(--pb-music-obi-color);
+    box-shadow: inset -1px 0 rgba(0, 0, 0, 0.15), 3px 0 9px rgba(0, 0, 0, 0.1);
+    color: #fff;
+    flex-direction: column;
+    contain: size;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi-label,
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi-id,
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi-year {
+    display: block;
+    color: inherit;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    opacity: 0.94;
+    transform: rotate(180deg);
+    white-space: nowrap;
+    writing-mode: vertical-rl;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi-label {
+    font-size: 0.56rem;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi-id {
+    font-size: 0.44rem;
+    opacity: 0.62;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__obi-year {
+    font-size: 0.5rem;
+    font-weight: 700;
+    opacity: 0.78;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__case {
+    position: relative;
+    display: grid;
+    width: 176px;
+    height: 176px;
+    align-self: center;
+    place-items: center;
+    padding: 6px 8px 6px 10px;
+    border-right: 1px solid rgba(127, 127, 127, 0.26);
+    border-radius: 0 6px 6px 0;
+    background: rgba(127, 127, 127, 0.08);
+    box-shadow: inset -3px 0 7px rgba(0, 0, 0, 0.06), 3px 0 9px rgba(0, 0, 0, 0.05);
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__case::before,
+.bgm-card[data-subject-type='music'] .bgm-subject-card__case::after {
+    content: '';
+    position: absolute;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__case::before {
+    inset: 0 auto 0 3px;
+    width: 4px;
+    border-right: 1px solid rgba(127, 127, 127, 0.28);
+    background: rgba(255, 255, 255, 0.48);
+    opacity: 0.52;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__case::after {
+    inset: 5px 6px auto 9px;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.72);
+    opacity: 0.8;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__poster {
+    width: 160px;
+    height: 160px;
+    min-height: 0;
+    align-self: center;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.bgm-card .bgm-subject-card__poster.is-cover-error::before {
+    content: '暂无封面';
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 0.75rem;
+    color: var(--pb-subject-muted);
+    font-size: 0.72rem;
+    opacity: 0.58;
+    text-align: center;
+}
+
+.bgm-card .bgm-subject-card__image {
+    position: absolute !important;
+    inset: 0 !important;
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    object-fit: cover !important;
+    opacity: 0;
+    transition: opacity 0.22s ease;
+}
+
+.bgm-card .bgm-subject-card__poster.is-cover-loaded .bgm-subject-card__image {
+    opacity: 1;
+}
+
+.bgm-card .bgm-subject-card__content {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    padding: var(--pb-card-padding);
+}
+
+.bgm-card .bgm-subject-card__header {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__header {
+    padding-bottom: 0.44rem;
+    border-bottom: 1px solid var(--pb-subject-border);
+}
+
+.bgm-card .bgm-subject-card__eyebrow,
+.bgm-card .bgm-subject-card__rating,
+.bgm-card .bgm-subject-card__meta,
+.bgm-card .bgm-subject-card__tags,
+.bgm-card .bgm-subject-card__footer {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+}
+
+.bgm-card .bgm-subject-card__eyebrow {
+    gap: 0.5rem;
+    overflow: hidden;
+}
+
+.bgm-card .bgm-subject-card__type {
+    flex: 0 0 auto;
+    padding: 0.14rem 0.55rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: rgba(127, 127, 127, 0.12);
+    background: color-mix(in srgb, var(--pb-subject-accent) 13%, transparent);
+    color: var(--pb-subject-accent);
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.bgm-card .bgm-subject-card__kind {
+    flex: 0 0 auto;
+    color: var(--pb-subject-accent);
+    font-size: 0.62rem;
+    font-weight: 850;
+    letter-spacing: 0;
+    line-height: 1.2;
+}
+
+.bgm-card .bgm-subject-card__date {
+    overflow: hidden;
+    color: var(--pb-subject-muted);
+    font-size: 0.72rem;
+    line-height: 1.3;
+    opacity: 0.62;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bgm-card .bgm-subject-card__rating {
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    gap: 0.36rem;
+    line-height: 1;
+}
+
+/* 骨架同样带内边距，保证评分徽章与骨架高度一致 */
+.bgm-card .bgm-subject-card__score {
+    padding: 0.2rem 0.5rem;
+    color: #c88013;
+    font-size: 0.92rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 800;
+}
+
+.bgm-card .bgm-subject-card__score:not(.bgm-subject-card__placeholder):not(.is-empty) {
+    border-radius: 999px;
+    background: rgba(200, 128, 19, 0.12);
+}
+
+.bgm-card .bgm-subject-card__score.is-empty,
+.bgm-card .bgm-subject-card__rating-count,
+.bgm-card .bgm-subject-card__external {
+    color: var(--pb-subject-muted);
+    opacity: 0.58;
+}
+
+.bgm-card .bgm-subject-card__score.is-empty,
+.bgm-card .bgm-subject-card__rating-count {
+    font-size: 0.68rem;
+    font-weight: 500;
+}
+
+.bgm-card .bgm-subject-card__external {
+    font-size: 0.85rem;
+    transition: color 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+}
+
+.bgm-card .bgm-subject-card__title,
+.bgm-card .bgm-subject-card__subtitle,
+.bgm-card .bgm-subject-card__summary {
+    min-width: 0;
+    margin: 0 !important;
+    padding: 0 !important;
+    color: var(--pb-subject-text) !important;
+}
+
+.bgm-card .bgm-subject-card__title {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 0.42rem !important;
+    font-size: 1.08rem;
+    font-weight: 750;
+    letter-spacing: 0;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.bgm-card .bgm-subject-card__subtitle {
+    overflow: hidden;
+    margin-top: 0.12rem !important;
+    font-size: 0.73rem;
+    line-height: 1.35;
+    opacity: 0.56;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bgm-card .bgm-subject-card__credit {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-top: 0.3rem;
+    line-height: 1.35;
+}
+
+.bgm-card .bgm-subject-card__credit-label {
+    flex: 0 0 auto;
+    color: var(--pb-subject-accent);
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0;
+}
+
+.bgm-card .bgm-subject-card__credit-name {
+    overflow: hidden;
+    color: var(--pb-subject-text);
+    font-size: 0.69rem;
+    font-weight: 650;
+    opacity: 0.72;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bgm-card .bgm-subject-card__summary {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 0.34rem !important;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    opacity: 0.7;
+    text-overflow: ellipsis;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__summary {
+    margin-top: 0.36rem !important;
+    font-size: 0.66rem;
+    -webkit-line-clamp: 1;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__footer {
+    flex-wrap: nowrap;
+    align-items: flex-end;
+    border-top: 1px solid var(--pb-subject-border);
+}
+
+/* 底栏始终单行，避免长平台名或多标签撑高卡片、与骨架高度不一致 */
+.bgm-card .bgm-subject-card__footer {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 0.35rem 0.75rem;
+    margin-top: auto;
+    padding-top: 0.42rem;
+}
+
+.bgm-card .bgm-subject-card__meta {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    gap: 0.35rem 0.7rem;
+    white-space: nowrap;
+    color: var(--pb-subject-muted);
+    font-size: 0.7rem;
+    line-height: 1.4;
+    opacity: 0.64;
+}
+
+.bgm-card .bgm-subject-card__meta-item {
+    flex: 0 0 auto;
+}
+
+.bgm-card .bgm-subject-card__meta-item--primary {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bgm-card .bgm-subject-card__meta-item + .bgm-subject-card__meta-item::before {
+    content: '·';
+    margin-right: 0.7rem;
+}
+
+.bgm-card .bgm-subject-card__specs {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(3, auto);
+    gap: 0.95rem;
+}
+
+.bgm-card .bgm-subject-card__spec {
+    min-width: 0;
+}
+
+.bgm-card .bgm-subject-card__spec-label,
+.bgm-card .bgm-subject-card__spec-value {
+    display: block;
+    line-height: 1;
+}
+
+.bgm-card .bgm-subject-card__spec-label {
+    color: var(--pb-subject-muted);
+    font-size: 0.56rem;
+    font-weight: 750;
+    letter-spacing: 0;
+    opacity: 0.55;
+}
+
+.bgm-card .bgm-subject-card__spec-value {
+    margin-top: 0.22rem;
+    color: var(--pb-subject-text);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+/* 放不下的标签换到被裁掉的第二行，整枚隐藏而不是被截断 */
+.bgm-card .bgm-subject-card__tags {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.28rem;
+    min-width: 0;
+    max-height: calc(1.25em + 0.28rem + 2px);
+    overflow: hidden;
+    font-size: 0.66rem;
+}
+
+.bgm-card .bgm-subject-card__tag {
+    padding: 0.14rem 0.5rem;
+    border: 1px solid var(--pb-subject-border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--pb-subject-muted);
+    font-size: 1em;
+    line-height: 1.25;
+    opacity: 0.76;
+    white-space: nowrap;
+}
+
+.bgm-card .bgm-subject-card__tag::before {
+    content: '#';
+    margin-right: 0.1rem;
+    opacity: 0.5;
+}
+
+.bgm-card .bgm-subject-card__tag.bgm-subject-card__placeholder::before {
+    content: none;
+}
+
+.bgm-card .bgm-subject-card-state {
+    width: 100%;
+    min-height: 168px;
+    overflow: hidden;
+    border: 1px solid var(--pb-subject-border);
+    border-radius: 14px;
+    background: var(--pb-subject-bg);
+}
+
+.bgm-card .bgm-subject-card--skeleton,
+.bgm-card .bgm-subject-card--skeleton:hover {
+    box-shadow: var(--pb-shadow);
+    cursor: default;
+    transform: none;
+}
+
+.bgm-card .bgm-subject-card--skeleton .bgm-subject-card__obi {
+    background: var(--pb-subject-skeleton);
+    box-shadow: none;
+}
+
+/* 占位元素沿用正式卡片的类名，只把文字替换为同字号的色条 */
+.bgm-card .bgm-subject-card__placeholder {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    flex: 0 0 auto;
+    border-color: transparent !important;
+    background: linear-gradient(var(--pb-subject-skeleton), var(--pb-subject-skeleton)) left center / 100% 0.72em no-repeat;
+    color: transparent !important;
+    opacity: 1;
+    white-space: nowrap;
+    animation: bgmSkeletonPulse 1.35s ease-in-out infinite;
+}
+
+.bgm-card .bgm-subject-card__type.bgm-subject-card__placeholder,
+.bgm-card .bgm-subject-card__tag.bgm-subject-card__placeholder {
+    background-size: 100% 100%;
+}
+
+.bgm-card .bgm-subject-card__type.bgm-subject-card__placeholder {
+    width: 2.35rem;
+}
+
+.bgm-card .bgm-subject-card__kind.bgm-subject-card__placeholder {
+    width: 2.2rem;
+}
+
+.bgm-card .bgm-subject-card__date.bgm-subject-card__placeholder {
+    width: 4.4rem;
+}
+
+.bgm-card .bgm-subject-card__score.bgm-subject-card__placeholder {
+    width: 4.6rem;
+}
+
+.bgm-card .bgm-subject-card__title.bgm-subject-card__placeholder {
+    width: 60%;
+}
+
+.bgm-card .bgm-subject-card__subtitle.bgm-subject-card__placeholder {
+    width: 38%;
+}
+
+.bgm-card .bgm-subject-card__credit.bgm-subject-card__placeholder {
+    width: 46%;
+    font-size: 0.69rem;
+}
+
+.bgm-card .bgm-subject-card__summary.bgm-subject-card__placeholder {
+    min-height: 3em;
+    background:
+        linear-gradient(var(--pb-subject-skeleton), var(--pb-subject-skeleton)) left 0.39em / 100% 0.72em no-repeat,
+        linear-gradient(var(--pb-subject-skeleton), var(--pb-subject-skeleton)) left 1.89em / 68% 0.72em no-repeat;
+}
+
+.bgm-card[data-subject-type='music'] .bgm-subject-card__summary.bgm-subject-card__placeholder {
+    min-height: 1.5em;
+    background-size: 88% 0.72em, 0 0;
+}
+
+.bgm-card .bgm-subject-card__meta.bgm-subject-card__placeholder {
+    width: 7.5rem;
+}
+
+.bgm-card .bgm-subject-card__specs.bgm-subject-card__placeholder {
+    width: 9.5rem;
+    height: 1.46rem;
+    background:
+        linear-gradient(var(--pb-subject-skeleton), var(--pb-subject-skeleton)) left top / 70% 0.42rem no-repeat,
+        linear-gradient(var(--pb-subject-skeleton), var(--pb-subject-skeleton)) left bottom / 100% 0.56rem no-repeat;
+}
+
+.bgm-card .bgm-subject-card__placeholder--short {
+    width: 2.3rem;
+}
+
+.bgm-card .bgm-subject-card__placeholder--long {
+    width: 2.9rem;
+}
+
+.bgm-card .bgm-subject-card-state--error {
+    display: grid;
+    min-height: 96px;
+    place-items: center;
+    padding: 1.25rem;
+    color: #b54a4a;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    text-align: center;
+}
+
+.bgm-card .bgm-subject-card__sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+@media screen and (max-width: 520px) {
+    .bgm-card {
+        --pb-card-poster-width: 82px;
+        --pb-card-min-height: 139px;
+        --pb-card-padding: 0.1rem 0.25rem 0.1rem 0.7rem;
+    }
+
+    .bgm-card[data-subject-type='music'] {
+        --pb-card-min-height: 146px;
+    }
+
+    .bgm-card .bgm-subject-card {
+        padding: 8px;
+        border-radius: 12px;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card {
+        grid-template-columns: 6px 110px minmax(0, 1fr);
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__obi {
+        min-height: 130px;
+        padding: 0;
+        box-shadow: inset -1px 0 rgba(0, 0, 0, 0.12);
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__obi-label,
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__obi-id,
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__obi-year {
+        display: none;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__case {
+        width: 110px;
+        height: 130px;
+        padding: 10px 4px;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__case::before {
+        left: 1px;
+        width: 3px;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__case::after {
+        inset: 9px 3px auto 4px;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__poster {
+        width: 104px;
+        height: 104px;
+    }
+
+    .bgm-card .bgm-subject-card__summary,
+    .bgm-card .bgm-subject-card__rating-count {
+        display: none;
+    }
+
+    .bgm-card .bgm-subject-card__header {
+        gap: 0.4rem;
+    }
+
+    .bgm-card .bgm-subject-card__date {
+        font-size: 0.64rem;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__date {
+        display: none;
+    }
+
+    .bgm-card .bgm-subject-card__score.bgm-subject-card__placeholder {
+        width: 1.7rem;
+    }
+
+    .bgm-card .bgm-subject-card__title {
+        margin-top: 0.32rem !important;
+    }
+
+    .bgm-card .bgm-subject-card__subtitle {
+        font-size: 0.67rem;
+    }
+
+    .bgm-card .bgm-subject-card__kind {
+        font-size: 0.56rem;
+    }
+
+    .bgm-card .bgm-subject-card__credit {
+        gap: 0.3rem;
+        margin-top: 0.25rem;
+    }
+
+    .bgm-card .bgm-subject-card__credit-label {
+        font-size: 0.54rem;
+    }
+
+    .bgm-card .bgm-subject-card__credit-name {
+        font-size: 0.62rem;
+    }
+
+    .bgm-card .bgm-subject-card__credit.bgm-subject-card__placeholder {
+        font-size: 0.62rem;
+    }
+
+    .bgm-card .bgm-subject-card__footer {
+        align-items: flex-end;
+        gap: 0.25rem;
+        padding-top: 0.28rem;
+    }
+
+    .bgm-card .bgm-subject-card__meta {
+        font-size: 0.64rem;
+    }
+
+    .bgm-card .bgm-subject-card__tags {
+        font-size: 0.6rem;
+    }
+
+    .bgm-card .bgm-subject-card__tag:nth-child(n + 3) {
+        display: none;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__tags {
+        display: none;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__spec--collection {
+        display: none;
+    }
+
+    .bgm-card .bgm-subject-card__specs {
+        grid-template-columns: repeat(2, auto);
+        gap: 0.85rem;
+    }
+
+    .bgm-card .bgm-subject-card__spec-label {
+        font-size: 0.52rem;
+    }
+
+    .bgm-card .bgm-subject-card__spec-value {
+        font-size: 0.62rem;
+    }
+
+    .bgm-card .bgm-subject-card__specs.bgm-subject-card__placeholder {
+        width: 6.2rem;
+        height: 1.36rem;
+    }
+
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__header {
+        padding-bottom: 0.3rem;
+    }
+}
+
+@media screen and (max-width: 360px) {
+    .bgm-card[data-subject-type='music'] .bgm-subject-card__date {
+        display: none;
+    }
+}
+
+/* --- 夜间模式样式追加 --- */
+
+body.theme-dark .bgm-collection,
+body.theme-dark .bgm-calendar,
+body.theme-dark .bgm-card {
+    --pb-subject-bg: #2a2a2d;
+    --pb-subject-border: rgba(255, 255, 255, 0.06);
+    --pb-subject-text: #e5e5ea;
+    --pb-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.32);
+    --pb-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 14px 32px rgba(0, 0, 0, 0.5);
+    --pb-control-active: #3a3a3c;
+}
+
+body.theme-dark .bgm-poster-card::before {
+    background-image: linear-gradient(105deg, transparent 28%, rgba(255, 255, 255, 0.12) 45%, transparent 62%);
+}
+
+body.theme-dark .cal-tab-button.active {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+body.theme-dark .bgm-load-error {
+    border-color: rgba(255, 143, 143, 0.3);
+    color: #ff8f8f;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .bgm-poster-card::before,
+    .bgm-card .bgm-subject-card__poster::after,
+    .bgm-poster-card__placeholder,
+    .bgm-card .bgm-subject-card__placeholder,
+    .cal-panel {
+        animation: none !important;
+    }
+
+    .bgm-poster-card,
+    .bgm-poster-card__cover,
+    .bgm-collection-action,
+    .bgm-card .bgm-subject-card,
+    .bgm-card .bgm-subject-card__image,
+    .bgm-card .bgm-subject-card__external {
+        transition: none;
+    }
+
+    .bgm-poster-card:hover,
+    .bgm-poster-card:hover .bgm-poster-card__cover,
+    .bgm-collection-action:hover,
+    .bgm-card .bgm-subject-card:hover {
+        transform: none !important;
+    }
+
+    .cal-week-trigger__chevron {
+        animation: none;
+    }
+
+    .cal-tabs {
+        transition: none;
+    }
+}
