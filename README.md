@@ -3,7 +3,7 @@
 把 [Bangumi](https://bgm.tv) 的收藏、每日放送和条目卡片带到 Halo。
 
 移植自 [mikusaa/Typecho-Plugin-PandaBangumi](https://github.com/mikusaa/Typecho-Plugin-PandaBangumi)（原作者 AlanDecode、Izumiko、mikusaa），
-移植者 awking。前端脚本与样式沿用原插件，只把数据接口换成了 Halo 插件端点。
+移植者 AwKings。前端脚本与样式沿用原插件，只把数据接口换成了 Halo 插件端点。
 
 ## 功能
 

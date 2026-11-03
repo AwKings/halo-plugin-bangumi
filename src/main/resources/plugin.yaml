@@ -7,13 +7,13 @@ metadata:
 spec:
   requires: ">=2.22.0"
   author:
-    name: awking
+    name: AwKings
   logo: logo.png
   homepage: https://blog.sanmizu.com/archives/halo-plugin-bangumi
   repo: https://github.com/AwKings/halo-plugin-bangumi
   issues: https://github.com/AwKings/halo-plugin-bangumi/issues
   displayName: "PandaBangumi"
-  description: "把 Bangumi 收藏、每日放送和条目卡片带到 Halo。移植者 awking。原作者：AlanDecode、Izumiko、mikusaa（https://github.com/mikusaa/Typecho-Plugin-PandaBangumi）。"
+  description: "把 Bangumi 收藏、每日放送和条目卡片带到 Halo。移植者 AwKings。原作者：AlanDecode、Izumiko、mikusaa（https://github.com/mikusaa/Typecho-Plugin-PandaBangumi）。"
   license:
     - name: "MIT"
       url: "https://github.com/AwKings/halo-plugin-bangumi/blob/main/LICENSE"
